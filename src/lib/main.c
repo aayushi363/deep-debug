@@ -16,6 +16,7 @@
 
 #include "dmtcp.h"
 #include "mcmini/mcmini.h"
+#include "deadlock_detector.h"
 
 volatile void *global_shm_start = NULL;
 
