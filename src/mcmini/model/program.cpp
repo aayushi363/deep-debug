@@ -128,7 +128,7 @@ state::runner_id_t program::discover_runner(const runner_state *initial_state,
 
 bool program::is_in_deadlock() const {
   // If there aren't any threads, this program isn't in deadlock.
-  if (this->get_pending_transitions().empty()) {
+  if (this->get_pending_transitions().size() == 0) {
     return false;
   }
 
