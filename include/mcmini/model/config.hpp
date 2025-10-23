@@ -64,6 +64,16 @@ struct config {
    */
   std::string checkpoint_file = "";
 
+  /**
+   * The directory where checkpoint files will be stored
+   */
+  std::string checkpoint_dir = "";
+
+  /*
+  * Informs DMTCP to not gzip the checkpoint files
+  */
+  bool nogzip = false;
+
   // Name of the target executable that will be model checked
   std::string target_executable = "";
 

@@ -402,6 +402,11 @@ void do_recording(const config& config) {
   dmtcp_launch_args.push_back("--disable-alloc-plugin");
   dmtcp_launch_args.push_back("-i");
   dmtcp_launch_args.push_back(std::to_string(config.checkpoint_period.count()));
+  dmtcp_launch_args.push_back("--no-gzip");
+  if (!config.checkpoint_dir.empty()) {
+    dmtcp_launch_args.push_back("--ckptdir");
+    dmtcp_launch_args.push_back(config.checkpoint_dir);
+  }
   dmtcp_launch_args.push_back("--with-plugin");
   dmtcp_launch_args.push_back(libmcmini_path);
   dmtcp_launch_args.push_back("--modify-env");
@@ -492,6 +497,12 @@ int main_cpp(int argc, const char** argv) {
                strcmp(cur_arg[0], "-rr") == 0) {
       mcmini_config.use_round_robin_scheduling = true;
       cur_arg += 1;
+    } else if (strcmp(cur_arg[0], "--no-gzip") == 0) {
+      mcmini_config.nogzip = true;
+      cur_arg++;
+    } else if(strcmp(cur_arg[0], "--ckptdir") == 0) {
+      mcmini_config.checkpoint_dir = cur_arg[1];
+      cur_arg += 2;
     } else if (strcmp(cur_arg[0], "--from-checkpoint") == 0 ||
                strcmp(cur_arg[0], "-ckpt") == 0) {
       mcmini_config.checkpoint_file = cur_arg[1];
