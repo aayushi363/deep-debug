@@ -12,6 +12,9 @@ add_executable(producer-consumer-park producer-consumer-park.c)
 add_executable(exit-stress exit-stress.c)
 add_executable(cv-producer-consumer cv-producer-consumer.c)
 add_executable(cv-producer-consumer-safe cv-producer-consumer-safe.c)
+add_executable(dining_phil dining_phil.c)
+add_executable(subtle subtle.c)
+add_executable(ABA_example ABA_example.c)
 target_link_libraries(hello-world PUBLIC -pthread)
 target_link_libraries(cv-hello-world PUBLIC -pthread)
 target_link_libraries(cv-test PUBLIC -pthread)
@@ -192,3 +195,7 @@ add_custom_command(TARGET cv-producer-consumer-multi-tsan POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy
           $<TARGET_FILE:cv-producer-consumer-multi-tsan>
           ${CMAKE_BINARY_DIR}/cv-producer-consumer-multi-tsan)
+
+target_link_libraries(dining_phil PUBLIC -pthread)
+target_link_libraries(subtle PUBLIC -pthread)
+target_link_libraries(ABA_example PUBLIC -pthread)
