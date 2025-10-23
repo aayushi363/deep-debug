@@ -20,6 +20,7 @@
 
 #include "dmtcp.h"
 #include "mcmini/mcmini.h"
+#include "deadlock_detector.h"
 
 #define SIG_MULTITHREADED_FORK (SIGRTMIN+6)
 
@@ -365,7 +366,11 @@ static void *template_thread(void *unused) {
     // Reaching this point means that we're in the branch: the
     // parent process (aka the template) will never exit
     // the above call to `mc_template_process_loop_forever()`.
-    set_current_mode(TARGET_BRANCH_AFTER_RESTART);
+  set_current_mode(TARGET_BRANCH_AFTER_RESTART);
+
+  // Phase I has completed for this process; disable the deadlock
+  // detector to avoid false positives during later phases.
+  mc_install_deadlock_detector(false);
 
     // Recall that the userspace threads in the template process
     // were idling/doing nothing. Indeed, those threads exist ONLY
@@ -566,6 +571,9 @@ static void presuspend_eventHook(DmtcpEvent_t event, DmtcpEventData_t *data) {
     case DMTCP_EVENT_PRECHECKPOINT: {
       set_current_mode(PRE_CHECKPOINT);
       log_verbose("DMTCP_EVENT_PRECHECKPOINT");
+      // Enable the deadlock detector during the pre-checkpoint/record phase
+      // so the process will be aborted if it enters deadlock while recording.
+      mc_install_deadlock_detector(true);
       break;
     }
     case DMTCP_EVENT_RESUME:
