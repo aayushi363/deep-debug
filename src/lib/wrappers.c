@@ -16,6 +16,7 @@
 #include "mcmini/common/exit.h"
 #include "mcmini/Thread_queue.h"
 #include "mcmini/mcmini.h"
+#include "deadlock_detector.h"
 
 // TSan's public annotation API (see <sanitizer/tsan_interface.h>): same
 // idiom as log_mut in log.c. The real lock/unlock here bypasses TSan's
@@ -139,6 +140,19 @@ runner_id_t mc_register_this_thread(void) {
   static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
   static runner_id_t tid_next = 0;
 
+  // Lazily enable deadlock detector when a thread registers while the
+  // library is in RECORD or PRE_CHECKPOINT mode. This ensures the detector
+  // is active only during Phase I recording.
+  switch (get_current_mode()) {
+    case RECORD:
+    case PRE_CHECKPOINT: {
+      mc_install_deadlock_detector(true);
+      break;
+    }
+    default:
+      break;
+  }
+
   libpthread_mutex_lock(&mut);
   tid_self = tid_next++;
   insert_pthread_map(pthread_self(), tid_self);
@@ -232,6 +246,8 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
         libpthread_mutex_lock(&rec_list_lock);
         mutex_record->vo.mut_state.status = UNLOCKED;
         libpthread_mutex_unlock(&rec_list_lock);
+        /* Notify deadlock detector that visible progress occurred. */
+        deadlock_detector_increment_progress();
       }
       return rc;
     }
@@ -328,6 +344,8 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
           mutex_record->vo.mut_state.owner = tid_self;
           libpthread_mutex_unlock(&rec_list_lock);
           if (__tsan_acquire) __tsan_acquire(mutex);
+          /* Notify deadlock detector that visible progress occurred. */
+          deadlock_detector_increment_progress();
           return rc;
         } else if (rc == ETIMEDOUT) {  // If the lock failed.
           // Here, the user-space thread did not manage to acquire
@@ -411,6 +429,8 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
         mutex_record->vo.mut_state.status = UNLOCKED;
         mutex_record->vo.mut_state.owner = RID_INVALID;
         libpthread_mutex_unlock(&rec_list_lock);
+        /* Notify deadlock detector that visible progress occurred. */
+        deadlock_detector_increment_progress();
       }
       return rc;
     }
@@ -501,6 +521,8 @@ MCMINI_NO_RETURN void mc_transparent_exit(int status) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
     case PRE_CHECKPOINT: {
+      /* Notify deadlock detector that visible progress occurred (process exiting). */
+      deadlock_detector_increment_progress();
       libc_exit(status);
     }
     case DMTCP_RESTART_INTO_BRANCH:
@@ -555,6 +577,8 @@ MCMINI_NO_RETURN void mc_transparent_abort(void) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
     case PRE_CHECKPOINT: {
+      /* Notify deadlock detector that visible progress occurred (process abort). */
+      deadlock_detector_increment_progress();
       libc_abort();
     }
     case DMTCP_RESTART_INTO_BRANCH:
@@ -673,7 +697,9 @@ void *mc_thread_routine_wrapper(void *arg) {
       // registered the thread (see TSAN-McMini-DMTCP.txt).
       thread_record = add_rec_entry_record_mode_ts(&vo);
       libpthread_mutex_unlock(&rec_list_lock);
-      libpthread_sem_post(&unwrapped_arg->mc_pthread_create_binary_sem);
+  /* Notify deadlock detector that visible progress occurred (thread created). */
+  deadlock_detector_increment_progress();
+  libpthread_sem_post(&unwrapped_arg->mc_pthread_create_binary_sem);
       break;
     }
     case TARGET_BRANCH:
@@ -702,7 +728,9 @@ void *mc_thread_routine_wrapper(void *arg) {
       thread_record->vo.thrd_state.status = EXITED;
       fprintf(stdout, "\n\nexited\n\n"); fflush(stdout);
       libpthread_mutex_unlock(&rec_list_lock);
-      return rv;
+  /* Notify deadlock detector that visible progress occurred (thread exited). */
+  deadlock_detector_increment_progress();
+  return rv;
     }
     case DMTCP_RESTART_INTO_BRANCH:
     case DMTCP_RESTART_INTO_TEMPLATE: {
@@ -1062,6 +1090,8 @@ static int mc_pthread_join_impl(pthread_t t, void **rv, bool defer_real_join,
           libpthread_mutex_lock(&rec_list_lock);
           thread_record->vo.thrd_state.status = EXITED;
           libpthread_mutex_unlock(&rec_list_lock);
+          /* Notify deadlock detector that visible progress occurred. */
+          deadlock_detector_increment_progress();
           return rc;
         } else if (rc == ETIMEDOUT) {
           // If the join failed.
@@ -1491,6 +1521,8 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
         }
 
         libpthread_mutex_unlock(&rec_list_lock);
+        /* Notify deadlock detector that visible progress occurred. */
+        deadlock_detector_increment_progress();
       }
       return rc;
     }
