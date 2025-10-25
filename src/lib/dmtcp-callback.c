@@ -16,9 +16,11 @@
 #include <sys/wait.h>
 #include <ucontext.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "dmtcp.h"
 #include "mcmini/mcmini.h"
+#include "mcmini/wrapper_timing.h"
 #include "deadlock_detector.h"
 
 #define SIG_MULTITHREADED_FORK (SIGRTMIN+6)
@@ -629,6 +631,176 @@ __attribute__((constructor)) void libmcmini_event_late_init() {
   pthread_attr_destroy(&attr);
 }
 
+/* ----- checkpoint preservation helper -----
+ * Preserve two images in the directory using names derived from a
+ * short "test code". Filenames used are:
+ *   ckpt_<test_code>_1.dmtcp   (most recent)
+ *   ckpt_<test_code>_2.dmtcp   (previous)
+ *
+ * The test code is derived heuristically from /proc/self/cmdline (for
+ * example the example name in paths such as src/examples/subtle) and
+ * falls back to the executable basename. Characters not in [A-Za-z0-9_-]
+ * are replaced with '_'. This is best-effort and only used to create
+ * readable filenames.
+ */
+
+/* copying checkpoint images is intentionally avoided in favor of rename/link
+ * operations; remove the copy helper to ensure unused-copy warnings don't
+ * break builds when copy fallback isn't used. */
+
+static void sanitize_token(char *dst, size_t dstlen, const char *src) {
+  size_t j = 0;
+  for (size_t i = 0; src[i] != '\0' && j + 1 < dstlen; ++i) {
+    char c = src[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_' || c == '-') {
+      dst[j++] = c;
+    } else {
+      dst[j++] = '_';
+    }
+  }
+  dst[j] = '\0';
+}
+
+static void derive_test_code(char *out, size_t outlen) {
+  /* Try to read /proc/self/cmdline and pick the most-meaningful token.
+   * Heuristics: look for a token that contains "src/examples/" and use
+   * its basename. Otherwise use argv0's basename. */
+  char buf[4096];
+  int fd = open("/proc/self/cmdline", O_RDONLY);
+  if (fd < 0) {
+    /* fallback */
+    strncpy(out, "unknown", outlen - 1);
+    out[outlen-1] = '\0';
+    return;
+  }
+  ssize_t n = read(fd, buf, sizeof(buf)-1);
+  close(fd);
+  if (n <= 0) {
+    strncpy(out, "unknown", outlen - 1);
+    out[outlen-1] = '\0';
+    return;
+  }
+  buf[n] = '\0';
+
+  /* cmdline is NUL-separated tokens */
+  char *tok = buf;
+  char *best = NULL;
+  while (tok < buf + n) {
+    size_t tlen = strlen(tok);
+    if (tlen == 0) break;
+    if (strstr(tok, "src/examples/") != NULL) {
+      best = tok;
+      break;
+    }
+    tok += tlen + 1;
+  }
+  if (!best) {
+    /* use first token (argv0) */
+    best = buf;
+  }
+
+  /* If best contains '/', take basename */
+  const char *p = strrchr(best, '/');
+  const char *base = p ? p+1 : best;
+
+  /* If base looks like a path (e.g., example name may have extension), strip ext */
+  char tmp[256];
+  strncpy(tmp, base, sizeof(tmp)-1);
+  tmp[sizeof(tmp)-1] = '\0';
+  char *dot = strrchr(tmp, '.');
+  if (dot) *dot = '\0';
+  sanitize_token(out, outlen, tmp);
+  if (out[0] == '\0') strncpy(out, "unknown", outlen-1);
+}
+
+static void preserve_two_checkpoints_in_dir(const char *dir) {
+  MEASURE_FUNCTION_TIME;
+  DIR *dp = opendir(dir);
+  if (!dp) return;
+  struct dirent *ent;
+  char newest[PATH_MAX] = {0};
+  double newest_m = 0;
+
+  while ((ent = readdir(dp)) != NULL) {
+    size_t n = strlen(ent->d_name);
+    if (n > 6 && strcmp(ent->d_name + n - 6, ".dmtcp") == 0) {
+      char full[PATH_MAX];
+      if (snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name) >= (int)sizeof(full)) continue;
+      struct stat sb;
+      if (stat(full, &sb) != 0) continue;
+      double m = (double)sb.st_mtime;
+      if (m > newest_m) {
+        /* update newest only */
+        strncpy(newest, full, sizeof(newest)-1);
+        newest_m = m;
+      }
+    }
+  }
+  closedir(dp);
+
+  if (!newest[0]) return; /* nothing to do */
+
+  /* derive test code and filenames: ckpt_<code>_1.dmtcp (latest) and
+   * ckpt_<code>_2.dmtcp (previous) */
+  char test_code[128];
+  derive_test_code(test_code, sizeof(test_code));
+
+  char latest_name[256];
+  char prev_name[256];
+  snprintf(latest_name, sizeof(latest_name), "ckpt_%s_1.dmtcp", test_code);
+  snprintf(prev_name, sizeof(prev_name), "ckpt_%s_2.dmtcp", test_code);
+  char latest_path[PATH_MAX];
+  char prev_path[PATH_MAX];
+  snprintf(latest_path, sizeof(latest_path), "%s/%s", dir, latest_name);
+  snprintf(prev_path, sizeof(prev_path), "%s/%s", dir, prev_name);
+
+  /* rotate existing latest -> prev (best-effort) */
+  /* Prefer renames/links over copying the checkpoint image. Copying can
+   * be expensive or disallowed (file in use). Strategy (best-effort):
+   * 1) Move existing latest -> prev via rename. If rename fails, try
+   *    creating a hard link prev <- latest and then unlink latest to
+   *    emulate move. If that fails, give up on preserving prev.
+   * 2) Move newest -> latest via rename. If rename fails, try hard link
+   *    latest <- newest. Do NOT fall back to copying.
+   */
+
+  if (access(latest_path, F_OK) == 0) {
+    /* remove old prev */
+    unlink(prev_path);
+    if (rename(latest_path, prev_path) != 0) {
+      /* try to create hard link prev <- latest, then unlink latest */
+      if (link(latest_path, prev_path) == 0) {
+        /* attempt to remove the old latest; not critical if it fails */
+        unlink(latest_path);
+      } else {
+        log_verbose("[ckpt-rotate] could not rotate %s -> %s: %s",
+                    latest_path, prev_path, strerror(errno));
+      }
+    }
+  }
+
+  /* Move (rename) newest -> latest, prefer atomic rename. If rename
+   * fails (e.g., cross-filesystem), try hard link. We do NOT copy. */
+  if (strcmp(newest, latest_path) == 0) {
+    /* already named as desired */
+  } else {
+    if (rename(newest, latest_path) != 0) {
+      if (link(newest, latest_path) == 0) {
+        /* leave the original 'newest' entry in place; that's fine */
+        log_verbose("[ckpt-rotate] linked %s -> %s (rename failed: %s)",
+                    newest, latest_path, strerror(errno));
+      } else {
+        log_verbose("[ckpt-rotate] could not rename or link %s -> %s: %s",
+                    newest, latest_path, strerror(errno));
+      }
+    }
+  }
+
+  /* Done - best-effort only */
+}
+
+
 static void presuspend_eventHook(DmtcpEvent_t event, DmtcpEventData_t *data) {
   switch (event) {
     case DMTCP_EVENT_INIT: {
@@ -661,9 +833,25 @@ static void presuspend_eventHook(DmtcpEvent_t event, DmtcpEventData_t *data) {
       mc_install_deadlock_detector(true);
       break;
     }
-    case DMTCP_EVENT_RESUME:
+    case DMTCP_EVENT_RESUME: {
       log_verbose("DMTCP_EVENT_RESUME");
+      /* After a checkpoint completes DMTCP will resume the process. At
+       * this point the final .dmtcp image should be present in the
+       * current working directory. Preserve the two most recent images
+       * as ckpt_latest.dmtcp and ckpt_prev.dmtcp so that the last and
+       * second-to-last checkpoints are kept. */
+      {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+          /* rotate in-place; best-effort only */
+          extern void preserve_two_checkpoints_in_dir(const char *dir);
+          preserve_two_checkpoints_in_dir(cwd);
+        } else {
+          log_verbose("[ckpt-rotate] getcwd failed: %s", strerror(errno));
+        }
+      }
       break;
+    }
     case DMTCP_EVENT_RESTART: {
       log_verbose("DMTCP_EVENT_RESTART callback");
       if (getenv("MCMINI_TEMPLATE_LOOP")) {

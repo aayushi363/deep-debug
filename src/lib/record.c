@@ -5,6 +5,7 @@
 #include "mcmini/spy/checkpointing/transitions.h"
 #include "mcmini/spy/checkpointing/tsan_support.h"
 #include "mcmini/spy/intercept/interception.h"
+#include "mcmini/wrapper_timing.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +41,7 @@ rec_list *find_thread_record_mode(pthread_t thrd) {
 }
 
 rec_list *find_object_record_mode(void *addr) {
+  MEASURE_FUNCTION_TIME
   return find_object(addr, head_record_mode);
 }
 
@@ -62,6 +64,7 @@ rec_list *add_rec_entry(const visible_object *vo, rec_list **head, rec_list **cu
 }
 
 rec_list *add_rec_entry_record_mode(const visible_object *vo) {
+  MEASURE_FUNCTION_TIME
   rec_list *new_node = (rec_list *)malloc(sizeof(rec_list));
   if (new_node == NULL) {
     perror("malloc");
