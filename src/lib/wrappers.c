@@ -36,6 +36,37 @@ extern void *__tsan_create_fiber(unsigned flags) __attribute__((weak));
 extern void __tsan_switch_to_fiber(void *fiber, unsigned flags)
     __attribute__((weak));
 
+// This function will run automatically when libmcmini.so is loaded.
+__attribute__((constructor))
+static void initialize_timer_on_load(void) {
+  const char* home_dir = getenv("HOME");
+  char* report_path = NULL;
+
+  if (home_dir) {
+    report_path = malloc(strlen(home_dir) + 64);
+    if (!report_path) { timer_init("/tmp/mcmini-timing-report.txt"); return; }
+    sprintf(report_path, "%s/mcmini-timing-report.txt", home_dir);
+    if (access(report_path, F_OK) == 0) {
+      int i = 1;
+      for (i = 1; i < 1000; ++i) {
+        sprintf(report_path, "%s/mcmini-timing-report-%d.txt", home_dir, i);
+        if (access(report_path, F_OK) != 0) break;
+      }
+    }
+  } else {
+    const char* fallback_path = "/tmp/mcmini-timing-report.txt";
+    report_path = malloc(strlen(fallback_path) + 1);
+    if (!report_path) { timer_init(NULL); return; }
+    strcpy(report_path, fallback_path);
+  }
+  timer_init(report_path);
+}
+
+__attribute__((destructor))
+static void save_report_on_unload(void) {
+  save_timing_report(NULL);
+}
+
 typedef struct pthread_map {
     pthread_t thread;
     runner_id_t value;
@@ -137,6 +168,7 @@ MCMINI_THREAD_LOCAL runner_id_t tid_self = RID_INVALID;
 MCMINI_THREAD_LOCAL int mc_creating_internal_thread = 0;
 
 runner_id_t mc_register_this_thread(void) {
+  MEASURE_FUNCTION_TIME
   static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
   static runner_id_t tid_next = 0;
 
@@ -169,6 +201,7 @@ volatile runner_mailbox *thread_get_mailbox() {
 }
 
 void thread_wake_scheduler_and_wait(void) {
+  MEASURE_FUNCTION_TIME
   log_verbose("thread_wake_scheduler_and_wait\n");
   fflush(stdout);
   assert(tid_self != RID_INVALID);
@@ -212,6 +245,7 @@ void thread_block_indefinitely(void) {
 int mc_pthread_mutex_init(pthread_mutex_t *mutex,
                           const pthread_mutexattr_t *attr) {
   // FIXME: Only handles NORMAL mutexes
+  MEASURE_FUNCTION_TIME
   if (attr != NULL) {
     int type;
     pthread_mutexattr_gettype(attr, &type);
@@ -226,6 +260,7 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
     }
     case RECORD:
     case PRE_CHECKPOINT: {
+      
       // NOTE: This is subtle: at this point, the possible modes are
       // RECORD ***AND*** DMTCP_RESTART. The latter is possible if
       // checkpointing occurs anywhere AFTER the switch statement above.
@@ -240,8 +275,9 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
         mutex_record = add_rec_entry_record_mode(&vo);
       }
       libpthread_mutex_unlock(&rec_list_lock);
-
+      PAUSE_TIMER
       int rc = libpthread_mutex_init(mutex, attr);
+      RESUME_TIMER
       if (rc == 0) {  // Init
         libpthread_mutex_lock(&rec_list_lock);
         mutex_record->vo.mut_state.status = UNLOCKED;
@@ -279,6 +315,7 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
 }
 
 int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
+  MEASURE_FUNCTION_TIME
   // On entry, there are several cases:
   //
   // 1. The thread was executing before dmtcp has had a chance
@@ -333,7 +370,9 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
         struct timespec time;
         clock_gettime(CLOCK_REALTIME, &time);
         time.tv_sec += 2;
+        PAUSE_TIMER
         int rc = libpthread_mutex_timedlock(mutex, &time);
+        RESUME_TIMER
         if (rc == 0) {  // Lock succeeded
           libpthread_mutex_lock(&rec_list_lock);
           // Record the owner too: a checkpoint can land while this thread is
@@ -401,6 +440,7 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
 }
 
 int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
+  MEASURE_FUNCTION_TIME
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
@@ -421,8 +461,10 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
                 mutex);
         libc_abort();
       }
+      PAUSE_TIMER
       libpthread_mutex_unlock(&rec_list_lock);
       if (__tsan_release) __tsan_release(mutex);
+      RESUME_TIMER
       int rc = libpthread_mutex_unlock(mutex);
       if (rc == 0) {  // Unlock succeeded
         libpthread_mutex_lock(&rec_list_lock);

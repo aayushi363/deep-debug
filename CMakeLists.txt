@@ -70,6 +70,7 @@ set(LIBMCMINI_C_SRC
   src/lib/entry.c
   src/lib/interception.c
   src/lib/log.c
+  src/lib/wrapper_timing.c
   src/lib/main.c
   src/lib/deadlock_detector.c
   src/lib/record.c
