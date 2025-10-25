@@ -3,6 +3,7 @@
 #include "mcmini/spy/checkpointing/objects.h"
 #include "mcmini/spy/checkpointing/transitions.h"
 #include "mcmini/spy/intercept/interception.h"
+#include "mcmini/spy/checkpointing/uthash.h"
 #include "mcmini/wrapper_timing.h"
 
 #include <stdio.h>
@@ -38,9 +39,18 @@ rec_list *find_thread_record_mode(pthread_t thrd) {
   return NULL;
 }
 
-rec_list *find_object_record_mode(void *addr) {
+// This is O(n); replaced by hash map version
+// rec_list *find_object_record_mode(void *addr) {
+//   return find_object(addr, head_record_mode);
+// }
+
+// Hash map version of find_object_record_mode
+// with O(1) average time complexity
+rec_list *find_object_record_mode(void *addr){
   MEASURE_FUNCTION_TIME
-  return find_object(addr, head_record_mode);
+  rec_list *node;
+  HASH_FIND_PTR(object_hash_map, &addr, node);
+  return node;
 }
 
 rec_list *add_rec_entry(const visible_object *vo, rec_list **head, rec_list **current) {
