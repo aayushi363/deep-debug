@@ -7,6 +7,7 @@
 
 int mc_sem_init(sem_t *sem, int p, unsigned count) {
   // TODO: Does not handle interprocess semaphores
+  MEASURE_FUNCTION_TIME
   assert(p == 0);
   log_debug("mc_sem_init");
 
@@ -27,8 +28,9 @@ int mc_sem_init(sem_t *sem, int p, unsigned count) {
         sem_record = add_rec_entry_record_mode(&vo);
       }
       libpthread_mutex_unlock(&rec_list_lock);
-
+      PAUSE_TIMER
       int rc = libpthread_sem_init(sem, p, count);
+      RESUME_TIMER
       if (rc == 0) {
         libpthread_mutex_lock(&rec_list_lock);
         rec_list *sem_record = find_object_record_mode(sem);
@@ -66,6 +68,7 @@ int mc_sem_init(sem_t *sem, int p, unsigned count) {
 }
 
 int mc_sem_destroy(sem_t *sem) {
+  MEASURE_FUNCTION_TIME
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
@@ -83,8 +86,9 @@ int mc_sem_destroy(sem_t *sem) {
         sem_record = add_rec_entry_record_mode(&vo);
       }
       libpthread_mutex_unlock(&rec_list_lock);
-
+      PAUSE_TIMER
       int rc = libpthread_sem_destroy(sem);
+      RESUME_TIMER
       if (rc == 0) {
         libpthread_mutex_lock(&rec_list_lock);
         rec_list *sem_record = find_object_record_mode(sem);
@@ -122,6 +126,7 @@ int mc_sem_destroy(sem_t *sem) {
 
 int
 mc_sem_post(sem_t *sem) {
+  MEASURE_FUNCTION_TIME
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
@@ -144,7 +149,9 @@ mc_sem_post(sem_t *sem) {
         sem_record = add_rec_entry_record_mode(&vo);
       }
       libpthread_mutex_unlock(&rec_list_lock);
+      PAUSE_TIMER
       int rc = libpthread_sem_post(sem);
+      RESUME_TIMER
       if (rc == 0) {  // Post succeeded
         libpthread_mutex_lock(&rec_list_lock);
         sem_record->vo.sem_state.count++;
@@ -175,6 +182,7 @@ mc_sem_post(sem_t *sem) {
 }
 
 int mc_sem_wait(sem_t *sem) {
+  MEASURE_FUNCTION_TIME
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
@@ -200,7 +208,9 @@ int mc_sem_wait(sem_t *sem) {
       while (1) {
         // Do sem_timedwait for one second ...
         clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec++;
+        PAUSE_TIMER
         int rc = libpthread_sem_timedwait(sem, &ts);
+        RESUME_TIMER
         if (rc == 0) {  // Wait succeeded
           libpthread_mutex_lock(&rec_list_lock);
           sem_record->vo.sem_state.count--;
