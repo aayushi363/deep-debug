@@ -16,6 +16,63 @@
 #include "mcmini/mcmini.h"
 #include "deadlock_detector.h"
 
+// This function will run automatically when libmcmini.so is loaded.
+__attribute__((constructor))
+static void initialize_timer_on_load(void) {
+  const char* home_dir = getenv("HOME");
+  char* report_path = NULL;
+
+  if (home_dir) {
+    // Allocate a larger buffer to be safe with numbered suffixes.
+    // This can handle path lengths up to strlen(home_dir) + 63 characters.
+    report_path = malloc(strlen(home_dir) + 64);
+    if (!report_path) {
+        // Handle malloc failure
+        timer_init("/tmp/mcmini-timing-report.txt");
+        return;
+    }
+
+    // Start with the base filename.
+    sprintf(report_path, "%s/mcmini-timing-report.txt", home_dir);
+
+    // Check if the file already exists using access(). F_OK checks for existence.
+    // If access() returns 0, the file exists.
+    if (access(report_path, F_OK) == 0) {
+      int i = 1;
+      // Loop to find a unique filename, e.g., mcmini-timing-report(1).txt
+      // We'll try up to 999 times to avoid an infinite loop.
+      for (i = 1; i < 1000; ++i) {
+        sprintf(report_path, "%s/mcmini-timing-report-%d.txt", home_dir, i);
+        // If we find a filename that does NOT exist, break the loop.
+        if (access(report_path, F_OK) != 0) {
+          break;
+        }
+      }
+    }
+  } else {
+    // Fallback if HOME isn't set. For simplicity, we don't add numbering here,
+    // but the same logic could be applied.
+    const char* fallback_path = "/tmp/mcmini-timing-report.txt";
+    report_path = malloc(strlen(fallback_path) + 1);
+    if (!report_path) {
+        timer_init(NULL); // Let timer_init handle the NULL case
+        return;
+    }
+    strcpy(report_path, fallback_path);
+  }
+
+  timer_init(report_path);
+
+}
+
+// This function will run automatically when the program exits or the library is unloaded.
+__attribute__((destructor))
+static void save_report_on_unload(void) {
+  // The global g_report_filepath is already set by the constructor.
+  // The 'save_timing_report' function in timer.h uses this global variable.
+  save_timing_report(NULL); // Pass NULL to use the globally configured path.
+}
+
 typedef struct pthread_map {
     pthread_t thread;
     runner_id_t value;
@@ -52,6 +109,7 @@ runner_id_t search_pthread_map(pthread_t t) {
 MCMINI_THREAD_LOCAL runner_id_t tid_self = RID_INVALID;
 
 runner_id_t mc_register_this_thread(void) {
+  MEASURE_FUNCTION_TIME
   static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
   static runner_id_t tid_next = 0;
 
@@ -84,6 +142,7 @@ volatile runner_mailbox *thread_get_mailbox() {
 }
 
 void thread_wake_scheduler_and_wait(void) {
+  MEASURE_FUNCTION_TIME
   log_verbose("thread_wake_scheduler_and_wait\n");
   fflush(stdout);
   assert(tid_self != RID_INVALID);
@@ -127,6 +186,7 @@ void thread_block_indefinitely(void) {
 int mc_pthread_mutex_init(pthread_mutex_t *mutex,
                           const pthread_mutexattr_t *attr) {
   // FIXME: Only handles NORMAL mutexes
+  MEASURE_FUNCTION_TIME
   if (attr != NULL) {
     int type;
     pthread_mutexattr_gettype(attr, &type);
@@ -141,6 +201,7 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
     }
     case RECORD:
     case PRE_CHECKPOINT: {
+      
       // NOTE: This is subtle: at this point, the possible modes are
       // RECORD ***AND*** DMTCP_RESTART. The latter is possible if
       // checkpointing occurs anywhere AFTER the switch statement above.
@@ -154,8 +215,9 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
         mutex_record = add_rec_entry_record_mode(&vo);
       }
       libpthread_mutex_unlock(&rec_list_lock);
-
+      PAUSE_TIMER
       int rc = libpthread_mutex_init(mutex, attr);
+      RESUME_TIMER
       if (rc == 0) {  // Init
         libpthread_mutex_lock(&rec_list_lock);
         mutex_record->vo.mut_state = UNLOCKED;
@@ -193,6 +255,7 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
 }
 
 int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
+  MEASURE_FUNCTION_TIME
   // On entry, there are several cases:
   //
   // 1. The thread was executing before dmtcp has had a chance
@@ -236,7 +299,9 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
 
       struct timespec time = {.tv_sec = 2};
       while (1) {
+        PAUSE_TIMER
         int rc = libpthread_mutex_timedlock(mutex, &time);
+        RESUME_TIMER
         if (rc == 0) {  // Lock succeeded
           libpthread_mutex_lock(&rec_list_lock);
           mutex_record->vo.mut_state = LOCKED;
@@ -294,6 +359,7 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
 }
 
 int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
+  MEASURE_FUNCTION_TIME
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
@@ -313,7 +379,9 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
                 mutex);
         libc_abort();
       }
+      PAUSE_TIMER
       libpthread_mutex_unlock(&rec_list_lock);
+      RESUME_TIMER
       int rc = libpthread_mutex_unlock(mutex);
       if (rc == 0) {  // Unlock succeeded
         libpthread_mutex_lock(&rec_list_lock);

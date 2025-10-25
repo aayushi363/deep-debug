@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "deadlock_detector.h"
 #include "mcmini/spy/intercept/interception.h"
+#include "mcmini/wrapper_timing.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,8 +84,12 @@ static void *deadlock_detector_sampler_thread(void *arg) {
     if (total_nsec < PROGRESS_NSEC) {
       int q = atomic_fetch_add(&quiet_intervals, 1) + 1;
       if (q >= QUIET_THRESHOLD) {
-        /* Minimal final message for downstream tooling. */
-        fprintf(stderr, "DEADLOCK DETECTED\n");
+        /* Attempt to save timing report directly from the sampler thread.
+         * The sampler thread is created with the real pthread_create via
+         * libpthread_pthread_create, so it won't be recorded by mc_pthread_create
+         * and it's safe to call the non-async-safe save routine here.
+         */
+        save_timing_report(NULL);
         _exit(1);
       }
     } else {
@@ -103,9 +108,8 @@ static void *deadlock_detector_sampler_thread(void *arg) {
         unsigned long last_cpu_ns = atomic_load(&last_progress_cpu_ns);
         unsigned long cpu_advance = (curr_cpu_ns > last_cpu_ns) ? (curr_cpu_ns - last_cpu_ns) : 0UL;
         if (cpu_advance >= CPU_BUSY_THRESHOLD_NS) {
-          /* Silent except for final abort line to keep Phase I recording
-           * output minimal and easy to parse. */
-          fprintf(stderr, "DEADLOCK DETECTED\n");
+          /* Save timing report directly from the sampler thread, then exit. */
+          save_timing_report(NULL);
           _exit(1);
         }
       }
