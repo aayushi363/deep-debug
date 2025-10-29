@@ -19,6 +19,8 @@ volatile atomic_int libmcmini_mode = PRE_DMTCP_INIT;
 visible_object empty_visible_obj = {.type = UNKNOWN, .location = NULL};
 rec_list *head_record_mode = NULL;
 rec_list *current_record_mode = NULL;
+// head for hash table (for fast lookup)
+rec_list *object_hash_map = NULL;
 
 transition invisible_operation_for_this_thread(void) {
   transition t = {.type = INVISIBLE_OPERATION_TYPE, .executor = pthread_self()};
@@ -73,6 +75,25 @@ rec_list *add_rec_entry(const visible_object *vo, rec_list **head, rec_list **cu
   return new_node;
 }
 
+// rec_list *add_rec_entry_record_mode(const visible_object *vo) {
+//   rec_list *new_node = (rec_list *)malloc(sizeof(rec_list));
+//   if (new_node == NULL) {
+//     perror("malloc");
+//     exit(EXIT_FAILURE);
+//   }
+//   new_node->vo = *vo;
+//   new_node->next = NULL;
+//   if (head_record_mode == NULL) {
+//     head_record_mode = new_node;
+//     current_record_mode = new_node;
+//   }
+//   else {
+//     current_record_mode->next = new_node;
+//     current_record_mode = new_node;
+//   }
+//   return new_node;
+// }
+
 rec_list *add_rec_entry_record_mode(const visible_object *vo) {
   MEASURE_FUNCTION_TIME
   rec_list *new_node = (rec_list *)malloc(sizeof(rec_list));
@@ -82,6 +103,12 @@ rec_list *add_rec_entry_record_mode(const visible_object *vo) {
   }
   new_node->vo = *vo;
   new_node->next = NULL;
+  
+  // Must clear the hash handle before adding
+  memset(&new_node->hh, 0, sizeof(new_node->hh));
+
+  // 1. Add to the linked list (SAME AS BEFORE)
+  // This ensures the snapshotter sees it in the correct order.
   if (head_record_mode == NULL) {
     head_record_mode = new_node;
     current_record_mode = new_node;
@@ -90,6 +117,12 @@ rec_list *add_rec_entry_record_mode(const visible_object *vo) {
     current_record_mode->next = new_node;
     current_record_mode = new_node;
   }
+
+  // 2. Add to the hash table (THE NEW PART)
+  // This ensures future lookups are O(1).
+  // We use vo->location as the key.
+  HASH_ADD_PTR(object_hash_map, vo.location, new_node);
+
   return new_node;
 }
 
