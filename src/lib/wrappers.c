@@ -202,27 +202,26 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
     }
     case RECORD:
     case PRE_CHECKPOINT: {
-      
-      // NOTE: This is subtle: at this point, the possible modes are
-      // RECORD ***AND*** DMTCP_RESTART. The latter is possible if
-      // checkpointing occurs anywhere AFTER the switch statement above.
-      libpthread_mutex_lock(&rec_list_lock);
-      rec_list *mutex_record = find_object_record_mode(mutex);
-      if (mutex_record == NULL) {
-        // FIXME: We assume that this is a normal mutex. For other mutex
-        // types, we'd need to behave differently
-        visible_object vo = {
-            .type = MUTEX, .location = mutex, .mut_state = UNINITIALIZED};
-        mutex_record = add_rec_entry_record_mode(&vo);
-      }
-      libpthread_mutex_unlock(&rec_list_lock);
+      // libpthread_mutex_lock(&rec_list_lock);
+      // rec_list *mutex_record = find_object_record_mode(mutex);
+      // if (mutex_record == NULL) {
+      //   // FIXME: We assume that this is a normal mutex. For other mutex
+      //   // types, we'd need to behave differently
+      //   visible_object vo = {
+      //       .type = MUTEX, .location = mutex, .mut_state = UNINITIALIZED};
+      //   mutex_record = add_rec_entry_record_mode(&vo);
+      // }
+      // libpthread_mutex_unlock(&rec_list_lock);
+      rec_list *mutex_record = get_or_create_object_record(mutex, MUTEX, UNINITIALIZED);
       PAUSE_TIMER
       int rc = libpthread_mutex_init(mutex, attr);
       RESUME_TIMER
       if (rc == 0) {  // Init
-        libpthread_mutex_lock(&rec_list_lock);
+        // libpthread_mutex_lock(&rec_list_lock);
+        libpthread_mutex_lock(&mutex_record->node_lock);
         mutex_record->vo.mut_state = UNLOCKED;
-        libpthread_mutex_unlock(&rec_list_lock);
+        //libpthread_mutex_unlock(&rec_list_lock);
+        libpthread_mutex_unlock(&mutex_record->node_lock);
         /* Notify deadlock detector that visible progress occurred. */
         deadlock_detector_increment_progress();
       }
@@ -289,24 +288,26 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
       // NOTE: This is subtle: at this point, the possible modes are
       // RECORD ***AND*** DMTCP_RESTART. The latter is possible if
       // checkpointing occurs anywhere AFTER the switch statement above.
-      libpthread_mutex_lock(&rec_list_lock);
-      rec_list *mutex_record = find_object_record_mode(mutex);
-      if (mutex_record == NULL) {
-        visible_object vo = {
-            .type = MUTEX, .location = mutex, .mut_state = UNINITIALIZED};
-        mutex_record = add_rec_entry_record_mode(&vo);
-      }
-      libpthread_mutex_unlock(&rec_list_lock);
-
+      // libpthread_mutex_lock(&rec_list_lock);
+      // rec_list *mutex_record = find_object_record_mode(mutex);
+      // if (mutex_record == NULL) {
+      //   visible_object vo = {
+      //       .type = MUTEX, .location = mutex, .mut_state = UNINITIALIZED};
+      //   mutex_record = add_rec_entry_record_mode(&vo);
+      // }
+      // libpthread_mutex_unlock(&rec_list_lock);
+      rec_list *mutex_record = get_or_create_object_record(mutex, MUTEX, UNINITIALIZED);
       struct timespec time = {.tv_sec = 2};
       while (1) {
         PAUSE_TIMER
         int rc = libpthread_mutex_timedlock(mutex, &time);
         RESUME_TIMER
         if (rc == 0) {  // Lock succeeded
-          libpthread_mutex_lock(&rec_list_lock);
+          // libpthread_mutex_lock(&rec_list_lock);
+          libpthread_mutex_lock(&mutex_record->node_lock);
           mutex_record->vo.mut_state = LOCKED;
-          libpthread_mutex_unlock(&rec_list_lock);
+          // libpthread_mutex_unlock(&rec_list_lock);
+          libpthread_mutex_unlock(&mutex_record->node_lock);
           /* Notify deadlock detector that visible progress occurred. */
           deadlock_detector_increment_progress();
           return rc;
@@ -369,25 +370,28 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
     }
     case RECORD:
     case PRE_CHECKPOINT: {
-      libpthread_mutex_lock(&rec_list_lock);
-      rec_list *mutex_record = find_object_record_mode(mutex);
-      if (mutex_record == NULL) {
-        // FIXME: We assume that this is a normal mutex. For other mutex
-        // types, we'd need to behave differently
-        fprintf(stderr,
-                "Undefined behavior: attempting to unlock an uninitialized "
-                "mutex %p",
-                mutex);
-        libc_abort();
-      }
+      // libpthread_mutex_lock(&rec_list_lock);
+      // rec_list *mutex_record = find_object_record_mode(mutex);
+      // if (mutex_record == NULL) {
+      //   // FIXME: We assume that this is a normal mutex. For other mutex
+      //   // types, we'd need to behave differently
+      //   fprintf(stderr,
+      //           "Undefined behavior: attempting to unlock an uninitialized "
+      //           "mutex %p",
+      //           mutex);
+      //   libc_abort();
+      // }
+      rec_list *mutex_record = get_or_create_object_record(mutex, MUTEX, UNINITIALIZED);
       PAUSE_TIMER
-      libpthread_mutex_unlock(&rec_list_lock);
-      RESUME_TIMER
+      // libpthread_mutex_unlock(&rec_list_lock);
       int rc = libpthread_mutex_unlock(mutex);
+      RESUME_TIMER
       if (rc == 0) {  // Unlock succeeded
-        libpthread_mutex_lock(&rec_list_lock);
+        // libpthread_mutex_lock(&rec_list_lock);
+        libpthread_mutex_lock(&mutex_record->node_lock);
         mutex_record->vo.mut_state = UNLOCKED;
-        libpthread_mutex_unlock(&rec_list_lock);
+        // libpthread_mutex_unlock(&rec_list_lock);
+        libpthread_mutex_unlock(&mutex_record->node_lock);
         /* Notify deadlock detector that visible progress occurred. */
         deadlock_detector_increment_progress();
       }
@@ -576,19 +580,20 @@ void *mc_thread_routine_wrapper(void *arg) {
       // The same applies to RECORD mode: we simply do the recording and let the
       // thread routine call the next wrapper function.
       pthread_t this_thread = pthread_self();
-      libpthread_mutex_lock(&rec_list_lock);
-      rec_list *thread_record = find_thread_record_mode(this_thread);
-      assert(thread_record == NULL);
-      visible_object vo = {.type = THREAD,
-                           .location = NULL,
-                           .thrd_state.pthread_desc = this_thread,
-                           .thrd_state.status = ALIVE,
-                           .thrd_state.id = rid};
-      thread_record = add_rec_entry_record_mode(&vo);
-      libpthread_mutex_unlock(&rec_list_lock);
-  /* Notify deadlock detector that visible progress occurred (thread created). */
-  deadlock_detector_increment_progress();
-  libpthread_sem_post(&unwrapped_arg->mc_pthread_create_binary_sem);
+      // libpthread_mutex_lock(&rec_list_lock);
+      // rec_list *thread_record = find_thread_record_mode(this_thread);
+      // assert(thread_record == NULL);
+      // visible_object vo = {.type = THREAD,
+      //                      .location = NULL,
+      //                      .thrd_state.pthread_desc = this_thread,
+      //                      .thrd_state.status = ALIVE,
+      //                      .thrd_state.id = rid};
+      // thread_record = add_rec_entry_record_mode(&vo);
+      // libpthread_mutex_unlock(&rec_list_lock);
+      get_or_create_thread_record(this_thread, rid, ALIVE);
+      /* Notify deadlock detector that visible progress occurred (thread created). */
+      deadlock_detector_increment_progress();
+      libpthread_sem_post(&unwrapped_arg->mc_pthread_create_binary_sem);
       break;
     }
     case TARGET_BRANCH:
@@ -611,12 +616,16 @@ void *mc_thread_routine_wrapper(void *arg) {
   switch (get_current_mode()) {
     case RECORD:
     case PRE_CHECKPOINT: {
-      libpthread_mutex_lock(&rec_list_lock);
+      // libpthread_mutex_lock(&rec_list_lock);
+      pthread_rwlock_rdlock(&rec_list_lock);
       rec_list *thread_record = find_thread_record_mode(pthread_self());
+      pthread_rwlock_unlock(&rec_list_lock);
       assert(thread_record != NULL);
+      libpthread_mutex_lock(&thread_record->node_lock);
       thread_record->vo.thrd_state.status = EXITED;
       fprintf(stdout, "\n\nexited\n\n"); fflush(stdout);
-      libpthread_mutex_unlock(&rec_list_lock);
+      libpthread_mutex_unlock(&thread_record->node_lock);
+      // libpthread_mutex_unlock(&rec_list_lock);
   /* Notify deadlock detector that visible progress occurred (thread exited). */
   deadlock_detector_increment_progress();
   return rv;
@@ -646,16 +655,17 @@ void record_main_thread(void) {
   pthread_t main_thread = pthread_self();
   runner_id_t main_tid = mc_register_this_thread();
   assert(main_tid == 0);
-  libpthread_mutex_lock(&rec_list_lock);
-  rec_list *thread_record = find_thread_record_mode(main_thread);
-  assert(thread_record == NULL);
-  visible_object vo = {.type = THREAD,
-                       .location = NULL,
-                       .thrd_state.id = main_tid,
-                       .thrd_state.pthread_desc = main_thread,
-                       .thrd_state.status = ALIVE};
-  thread_record = add_rec_entry_record_mode(&vo);
-  libpthread_mutex_unlock(&rec_list_lock);
+  // libpthread_mutex_lock(&rec_list_lock);
+  // rec_list *thread_record = find_thread_record_mode(main_thread);
+  // assert(thread_record == NULL);
+  // visible_object vo = {.type = THREAD,
+  //                      .location = NULL,
+  //                      .thrd_state.id = main_tid,
+  //                      .thrd_state.pthread_desc = main_thread,
+  //                      .thrd_state.status = ALIVE};
+  // thread_record = add_rec_entry_record_mode(&vo);
+  get_or_create_thread_record(main_thread, main_tid, ALIVE);
+  // libpthread_mutex_unlock(&rec_list_lock);
 }
 
 void record_checkpoint_thread(void) {
@@ -816,18 +826,22 @@ int mc_pthread_join(pthread_t t, void **rv) {
       // NOTE: This is subtle: at this point, the possible modes are
       // RECORD ***AND*** DMTCP_RESTART. The latter is possible if
       // checkpointing occurs anywhere AFTER the switch statement above.
-      libpthread_mutex_lock(&rec_list_lock);
+      // libpthread_mutex_lock(&rec_list_lock);
+      pthread_rwlock_rdlock(&rec_list_lock);
       rec_list *thread_record = find_thread_record_mode(t);
+      pthread_rwlock_unlock(&rec_list_lock);
       assert(thread_record != NULL);
-      libpthread_mutex_unlock(&rec_list_lock);
+      // libpthread_mutex_unlock(&rec_list_lock);
 
       struct timespec time = {.tv_sec = 2, .tv_nsec = 0};
       while (1) {
         int rc = pthread_timedjoin_np(t, rv, &time);
         if (rc == 0) {  // Join succeeded
-          libpthread_mutex_lock(&rec_list_lock);
+          // libpthread_mutex_lock(&rec_list_lock);
+          libpthread_mutex_lock(&thread_record->node_lock);
           thread_record->vo.thrd_state.status = EXITED;
-          libpthread_mutex_unlock(&rec_list_lock);
+          // libpthread_mutex_unlock(&rec_list_lock);
+          libpthread_mutex_unlock(&thread_record->node_lock);
           /* Notify deadlock detector that visible progress occurred. */
           deadlock_detector_increment_progress();
           return rc;
@@ -902,30 +916,21 @@ int mc_pthread_cond_init(pthread_cond_t *cond,
     }
     case RECORD:
     case PRE_CHECKPOINT: {
-      libpthread_mutex_lock(&rec_list_lock);
-      rec_list *cond_record = find_object_record_mode(cond);
-      if (cond_record == NULL) {
-        //Initialize the condition variable
-        visible_object vo = {
-            .type = CONDITION_VARIABLE, .location = cond,
-            .cond_state = { .status = CV_UNINITIALIZED, .interacting_thread = 0, .associated_mutex = NULL,
-            .count = 0 }
-        };
-        cond_record = add_rec_entry_record_mode(&vo);
-      }
-      libpthread_mutex_unlock(&rec_list_lock);
+      rec_list *cond_record = get_or_create_object_record(cond, CONDITION_VARIABLE, CV_UNINITIALIZED);
 
       int rc = libpthread_cond_init(cond, attr);
       if (rc == 0) {
-        libpthread_mutex_lock(&rec_list_lock);
+        libpthread_mutex_lock(&cond_record->node_lock);
         cond_record->vo.cond_state.status = CV_INITIALIZED;
         cond_record->vo.cond_state.interacting_thread = 0;
-        //we typically don't know which mutex will be associated with the
-        //condition variable until a thread actually waits on it.
+        /* we typically don't know which mutex will be associated with the
+           condition variable until a thread actually waits on it. */
         cond_record->vo.cond_state.associated_mutex = NULL;
         cond_record->vo.cond_state.waiting_threads = create_thread_queue();
         cond_record->vo.cond_state.count = 0;
-        libpthread_mutex_unlock(&rec_list_lock);
+        libpthread_mutex_unlock(&cond_record->node_lock);
+        /* Notify deadlock detector that visible progress occurred. */
+        deadlock_detector_increment_progress();
       }
       return rc;
     }
@@ -951,6 +956,7 @@ int mc_pthread_cond_init(pthread_cond_t *cond,
         libc_abort();
       }
   }
+  return 0;
 }
 
 int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
@@ -961,53 +967,49 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
     }
     case RECORD:
     case PRE_CHECKPOINT: {
+      /* Get thread record first (like main branch) */
       pthread_t this_thread = pthread_self();
-      libpthread_mutex_lock(&rec_list_lock);
+      pthread_rwlock_rdlock(&rec_list_lock);
       rec_list *thrd_record = find_thread_record_mode(this_thread);
-      rec_list *cond_record = find_object_record_mode(cond);
+      pthread_rwlock_unlock(&rec_list_lock);
       runner_id_t tmp = thrd_record->vo.thrd_state.id;
-      if (cond_record == NULL) {
-      //Initialize the condition variable
-        visible_object vo = {
-          .type = CONDITION_VARIABLE, .location = cond, .cond_state = { .status= CV_INITIALIZED, .interacting_thread = tmp,
-          .associated_mutex = mutex, .count = 0, .waiting_threads = create_thread_queue() }
-        };
-        cond_record = add_rec_entry_record_mode(&vo);
-      }
-      // The thread will enter in the outer waiting room first. Here its state will be
-      // CV_PREWAITING. It is done to avoid race condition that might occur due to checkpointing
-      // between releasing the mutex and actually getting into wait state.
+
+      /* Ensure condition variable record exists with CV_INITIALIZED status (like main branch) */
+      rec_list *cond_record = get_or_create_object_record(cond, CONDITION_VARIABLE, CV_INITIALIZED);
+
+      /* Register the thread in the outer waiting room (per-node lock replaces global lock) */
+      libpthread_mutex_lock(&cond_record->node_lock);
       cond_record->vo.cond_state.interacting_thread = tmp;
-      //check if thread is not already in the waiting room
       if (!is_in_thread_queue(cond_record->vo.cond_state.waiting_threads, tmp)) {
-        //add the thread to the waiting room
-      enqueue_thread(cond_record->vo.cond_state.waiting_threads,tmp,CV_PREWAITING);
+        enqueue_thread(cond_record->vo.cond_state.waiting_threads, tmp, CV_PREWAITING);
       }
       cond_record->vo.cond_state.associated_mutex = mutex;
       cond_record->vo.cond_state.count++;
-      libpthread_mutex_unlock(&rec_list_lock);
+      libpthread_mutex_unlock(&cond_record->node_lock);
 
       struct timespec wait_time = {.tv_sec = 2, .tv_nsec = 0};
       int rc;
       while (1) {
         rc = libpthread_cond_timedwait(cond, mutex, &wait_time);
         if (rc == 0) {
-          // The thread has successfully entered the waiting state.
-          libpthread_mutex_lock(&rec_list_lock);
+          /* The thread has successfully entered the waiting state. */
+          libpthread_mutex_lock(&cond_record->node_lock);
+          /* Re-get thread record (like main branch) */
+          pthread_rwlock_rdlock(&rec_list_lock);
           thrd_record = find_thread_record_mode(pthread_self());
+          pthread_rwlock_unlock(&rec_list_lock);
 
-          //Check if this thread was signaled (CV_SIGNALED state)
+          /* Check if this thread was signaled (CV_SIGNALED state) */
           condition_variable_status cv_state = get_thread_cv_state(cond_record->vo.cond_state.waiting_threads, thrd_record->vo.thrd_state.id);
 
           if (cv_state == CV_SIGNALED) {
-            // Remove this thread from the queue
+            /* Remove this thread from the queue */
             remove_thread_from_queue(cond_record->vo.cond_state.waiting_threads, thrd_record->vo.thrd_state.id);
             cond_record->vo.cond_state.count--;
+          } else {
+            update_thread_cv_state(cond_record->vo.cond_state.waiting_threads, thrd_record->vo.thrd_state.id, CV_WAITING);
           }
-          else {
-            update_thread_cv_state(cond_record->vo.cond_state.waiting_threads,thrd_record->vo.thrd_state.id,CV_WAITING);
-          }
-          libpthread_mutex_unlock(&rec_list_lock);
+          libpthread_mutex_unlock(&cond_record->node_lock);
           /* Notify deadlock detector that progress occurred - thread successfully waited/was signaled */
           deadlock_detector_increment_progress();
           return rc;
@@ -1044,30 +1046,30 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
           // - If the thread is in CV_WAITING (inner waiting room), we know it has entered a stable wait
           //   state, ensuring the mutex-conditional interaction is checkpoint-safe.
           if (is_in_restart_mode()) {
-              break;
+            break;
           }
           /* Check if this thread was signaled while in CV_PREWAITING state */
-          libpthread_mutex_lock(&rec_list_lock);
+          libpthread_mutex_lock(&cond_record->node_lock);
           condition_variable_status cv_state = get_thread_cv_state(cond_record->vo.cond_state.waiting_threads, thrd_record->vo.thrd_state.id);
           if (cv_state == CV_SIGNALED) {
             // Thread was signaled while in CV_PREWAITING, break out of loop
             remove_thread_from_queue(cond_record->vo.cond_state.waiting_threads, thrd_record->vo.thrd_state.id);
             cond_record->vo.cond_state.count--;
-            libpthread_mutex_unlock(&rec_list_lock);
+            libpthread_mutex_unlock(&cond_record->node_lock);
             /* Notify deadlock detector that progress occurred - thread was signaled while in CV_PREWAITING */
             deadlock_detector_increment_progress();
             return 0; // Successful wait (signaled)
           }
-          libpthread_mutex_unlock(&rec_list_lock);
+          libpthread_mutex_unlock(&cond_record->node_lock);
           /* Notify deadlock detector that progress occurred - thread is actively retrying cond_wait 
            * This prevents false positive deadlock detection during normal producer-consumer patterns */
           deadlock_detector_increment_progress();
         } else if (rc != 0 && rc != ETIMEDOUT) {
-          // A "true" error: something went wrong with locking
-          // and we pass this on to the end user
+          /* A "true" error: pass through to user */
           return rc;
         }
       }
+      /* fallthrough to restart handling */
     }
     case DMTCP_RESTART_INTO_BRANCH:
     case DMTCP_RESTART_INTO_TEMPLATE:{
@@ -1076,11 +1078,16 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
       thread_handle_after_dmtcp_restart();
+
+      /* Release the user mutex before waiting */
       libpthread_mutex_unlock(mutex);
+
       mb->type = COND_WAIT_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
       thread_handle_after_dmtcp_restart();
+
+      /* Re-acquire the user mutex after being signaled */
       libpthread_mutex_lock(mutex);
       return 0;
     }
@@ -1091,23 +1098,22 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
       thread_wake_scheduler_and_wait();
+
       libpthread_mutex_unlock(mutex);
+
       mb->type = COND_WAIT_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
       memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
       thread_wake_scheduler_and_wait();
+
       libpthread_mutex_lock(mutex);
       return 0;
     }
     default: {
-      // Wrapper functions should not be executing
-      // inside the template! If we reach this point, it
-      // means that this is a template process. This
-      // method must have been directly called
-      // erroneously.
       libc_abort();
     }
   }
+  return 0;
 }
 
 int mc_pthread_cond_signal(pthread_cond_t *cond) {
@@ -1118,16 +1124,19 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
     }
     case RECORD:
     case PRE_CHECKPOINT: {
-      libpthread_mutex_lock(&rec_list_lock);
+      /* Locate the cond record under read-lock, then use per-node lock */
+      pthread_rwlock_rdlock(&rec_list_lock);
       rec_list *cond_record = find_object_record_mode(cond);
+      pthread_rwlock_unlock(&rec_list_lock);
       if (cond_record == NULL) {
         fprintf(stderr,
                 "Undefined behavior: attempting to signal an uninitialized"
-                "condition variable %p",
+                " condition variable %p\n",
                 cond);
         libc_abort();
       }
-      // Store pre-signal waiting count (count both CV_WAITING and CV_PREWAITING threads)
+      /* Count pre-signal waiting threads (only CV_WAITING) */
+      libpthread_mutex_lock(&cond_record->node_lock);
       int cv_waiting_count = 0;
       thread_queue_node* current = cond_record->vo.cond_state.waiting_threads->front;
       while (current != NULL) {
@@ -1137,12 +1146,12 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
         current = current->next;
       }
       cond_record->vo.cond_state.prev_waiting_count = cv_waiting_count;
-      libpthread_mutex_unlock(&rec_list_lock);
+      libpthread_mutex_unlock(&cond_record->node_lock);
 
       int rc = libpthread_cond_signal(cond);
       if (rc == 0) {
-        libpthread_mutex_lock(&rec_list_lock);
-        // Try to find a thread in CV_WAITING state first, then CV_PREWAITING
+        libpthread_mutex_lock(&cond_record->node_lock);
+        /* Find a waiting thread and mark it signaled */
         runner_id_t waiting_thread = get_waiting_thread_node(cond_record->vo.cond_state.waiting_threads);
         if (waiting_thread == RID_INVALID && !is_queue_empty(cond_record->vo.cond_state.waiting_threads)) {
           // No CV_WAITING threads found, look for CV_PREWAITING threads
@@ -1156,12 +1165,12 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
           }
         }
         if (!is_queue_empty(cond_record->vo.cond_state.waiting_threads)) {
-           // Signal the first available thread (CV_WAITING or CV_PREWAITING)
-           if (waiting_thread != RID_INVALID) {
+          if (waiting_thread != RID_INVALID) {
             update_thread_cv_state(cond_record->vo.cond_state.waiting_threads, waiting_thread, CV_SIGNALED);
-           }
+          }
         }
-        // After signaling, check if any thread was marked as signaled
+
+        /* Check whether any thread was marked signaled */
         bool any_thread_signaled = false;
         current = cond_record->vo.cond_state.waiting_threads->front;
         while (current != NULL) {
@@ -1172,13 +1181,13 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
           current = current->next;
         }
 
-        // If no thread was signaled and there were waiting threads, it's a lost wakeup
+        /* If no thread was signaled but there were waiting threads, it's a lost wakeup */
         if (!any_thread_signaled && cond_record->vo.cond_state.prev_waiting_count > 0) {
           cond_record->vo.cond_state.lost_wakeups++;
           fprintf(stderr, "WARNING: Lost wakeup detected on condition variable %p\n", cond);
         }
 
-        libpthread_mutex_unlock(&rec_list_lock);
+        libpthread_mutex_unlock(&cond_record->node_lock);
         /* Notify deadlock detector that visible progress occurred. */
         deadlock_detector_increment_progress();
       }
@@ -1189,8 +1198,6 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
       volatile runner_mailbox *mb = thread_get_mailbox();
       mb->type = COND_SIGNAL_TYPE;
       memcpy_v(mb->cnts, &cond, sizeof(cond));
-      // notify_template_thread();
-      // thread_await_scheduler();
       thread_handle_after_dmtcp_restart();
       return libpthread_cond_signal(cond);
     }
@@ -1203,14 +1210,10 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
       return libpthread_cond_signal(cond);
     }
     default: {
-      // Wrapper functions should not be executing
-      // inside the template! If we reach this point, it
-      // means that this is a template process. This
-      // method must have been directly called
-      // erroneously.
       libc_abort();
     }
   }
+  return 0;
 }
 
 int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
@@ -1221,30 +1224,34 @@ int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
     }
     case RECORD:
     case PRE_CHECKPOINT: {
-      libpthread_mutex_lock(&rec_list_lock);
+      /* Locate the cond record under read-lock, then use per-node lock */
+      pthread_rwlock_rdlock(&rec_list_lock);
       rec_list *cond_record = find_object_record_mode(cond);
+      pthread_rwlock_unlock(&rec_list_lock);
       if (cond_record == NULL) {
         fprintf(stderr,
                 "Undefined behavior: attempting to broadcast an uninitialized"
-                "condition variable %p",
+                " condition variable %p\n",
                 cond);
         libc_abort();
       }
-      libpthread_mutex_unlock(&rec_list_lock);
+
       int rc = libpthread_cond_broadcast(cond);
       if (rc == 0) {
-        libpthread_mutex_lock(&rec_list_lock);
-        // Mark all waiting threads as signaled
+        libpthread_mutex_lock(&cond_record->node_lock);
+        /* Mark all waiting threads as signaled */
         thread_queue_node* current = cond_record->vo.cond_state.waiting_threads->front;
         while (current != NULL) {
-          // Only mark CV_WAITING threads as signaled (not transitional)
+          /* Only mark CV_WAITING threads as signaled (not transitional) */
           if (current->thread_cv_state == CV_WAITING) {
             update_thread_cv_state(cond_record->vo.cond_state.waiting_threads,
                                    current->thread, CV_SIGNALED);
           }
           current = current->next;
         }
-        libpthread_mutex_unlock(&rec_list_lock);
+        libpthread_mutex_unlock(&cond_record->node_lock);
+        /* Notify deadlock detector that visible progress occurred. */
+        deadlock_detector_increment_progress();
       }
       return rc;
     }
@@ -1268,6 +1275,7 @@ int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
       libc_abort();
     }
   }
+  return 0;
 }
 
 int mc_pthread_cond_destroy(pthread_cond_t *cond) {
@@ -1278,31 +1286,37 @@ int mc_pthread_cond_destroy(pthread_cond_t *cond) {
     }
     case RECORD:
     case PRE_CHECKPOINT: {
-      libpthread_mutex_lock(&rec_list_lock);
+      /* Locate the cond record under read-lock, then use per-node lock */
+      pthread_rwlock_rdlock(&rec_list_lock);
       rec_list *cond_record = find_object_record_mode(cond);
+      pthread_rwlock_unlock(&rec_list_lock);
       if (cond_record == NULL) {
         fprintf(stderr,
                 "Undefined behavior: attempting to destroy an uninitialized"
-                "condition variable %p",
+                " condition variable %p\n",
                 cond);
         libc_abort();
       }
 
-      // Check if any thread is waiting on this condition variable
+      /* Check if any thread is waiting on this condition variable */
+      libpthread_mutex_lock(&cond_record->node_lock);
       if (!is_queue_empty(cond_record->vo.cond_state.waiting_threads)) {
+        libpthread_mutex_unlock(&cond_record->node_lock);
         fprintf(stderr,
                 "Undefined behavior: attempting to destroy a condition variable"
-                " that has threads waiting on it %p",
+                " that has threads waiting on it %p\n",
                 cond);
         libc_abort();
       }
+      libpthread_mutex_unlock(&cond_record->node_lock);
 
-      libpthread_mutex_unlock(&rec_list_lock);
       int rc = libpthread_cond_destroy(cond);
       if (rc == 0) {
-        libpthread_mutex_lock(&rec_list_lock);
+        libpthread_mutex_lock(&cond_record->node_lock);
         cond_record->vo.cond_state.status = CV_DESTROYED;
-        libpthread_mutex_unlock(&rec_list_lock);
+        libpthread_mutex_unlock(&cond_record->node_lock);
+        /* Notify deadlock detector that visible progress occurred. */
+        deadlock_detector_increment_progress();
       }
       return rc;
     }
@@ -1326,4 +1340,5 @@ int mc_pthread_cond_destroy(pthread_cond_t *cond) {
       libc_abort();
     }
   }
+  return 0;
 }
