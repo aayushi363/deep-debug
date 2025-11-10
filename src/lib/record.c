@@ -11,9 +11,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <stdatomic.h>
 
 sem_t dmtcp_restart_sem;
-pthread_mutex_t rec_list_lock = PTHREAD_MUTEX_INITIALIZER;
+// Previously we used a mutex here; the codebase now uses a read-write lock.
+// Provide the actual definition (not extern) so the symbol is available to
+// other translation units and at dynamic link time.
+pthread_rwlock_t rec_list_lock = PTHREAD_RWLOCK_INITIALIZER;
 pthread_mutex_t pending_op_lock = PTHREAD_MUTEX_INITIALIZER;
 volatile atomic_int libmcmini_mode = PRE_DMTCP_INIT;
 visible_object empty_visible_obj = {.type = UNKNOWN, .location = NULL};
@@ -64,6 +70,7 @@ rec_list *add_rec_entry(const visible_object *vo, rec_list **head, rec_list **cu
     exit(EXIT_FAILURE);
   }
   new_node->vo = *vo;
+  libpthread_mutex_init(&new_node->node_lock, NULL);
   if (*head == NULL) {
     *head = new_node;
     *current = new_node;
@@ -103,6 +110,8 @@ rec_list *add_rec_entry_record_mode(const visible_object *vo) {
   }
   new_node->vo = *vo;
   new_node->next = NULL;
+
+  libpthread_mutex_init(&new_node->node_lock, NULL);
   
   // Must clear the hash handle before adding
   memset(&new_node->hh, 0, sizeof(new_node->hh));

@@ -173,7 +173,8 @@ typedef struct visible_object visible_object;
 typedef struct rec_list rec_list;
 
 extern sem_t dmtcp_restart_sem;
-extern pthread_mutex_t rec_list_lock;
+//extern pthread_mutex_t rec_list_lock;
+extern pthread_rwlock_t rec_list_lock;
 extern pthread_mutex_t dmtcp_list_lock;
 extern rec_list *head_record_mode;
 // The VIRTUAL tid of the checkpoint thread
@@ -184,6 +185,9 @@ extern rec_list *head_record_mode;
 /// or `NULL` if the object at address `addr` is not found
 ///
 /// @note you must acquire `rec_list_lock` before calling this function
+/// @note you must acquire `rec_list_rwlock` read lock for lookups and 
+/// write lock for modifications.
+
 rec_list *find_object(void *addr, rec_list *);
 rec_list *find_thread_record_mode(pthread_t);
 rec_list *find_object_record_mode(void *addr);
