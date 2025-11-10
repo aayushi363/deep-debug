@@ -24,9 +24,9 @@ static const int QUIET_THRESHOLD = 100;
 static const long PROGRESS_NSEC = 5000000; // 5 ms
 /* Livelock detection parameters */
 /* If no progress for this many samples (~10ms per sample), consider it stalled */
-static const long PROG_NO_ADVANCE_SAMPLES = 200; /* ~5s */
+static const long PROG_NO_ADVANCE_SAMPLES = 1000; /* ~10s - generous timeout for cond_wait scenarios */
 /* If CPU-time advanced by more than this while no progress, treat as livelock */
-static const unsigned long CPU_BUSY_THRESHOLD_NS = 50000000UL; /* 50 ms */
+static const unsigned long CPU_BUSY_THRESHOLD_NS = 1000000000UL; /* 1 second - very generous to account for cond_wait timeout loops */
 // Occasional tick counter for debug printing
 static atomic_long tick_count = 0;
 // Progress counter: wrappers may still increment this (kept for compatibility),
