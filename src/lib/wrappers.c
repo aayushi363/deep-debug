@@ -14,6 +14,7 @@
 #include "mcmini/common/exit.h"
 #include "mcmini/Thread_queue.h"
 #include "mcmini/mcmini.h"
+#include "mcmini/wrapper_timing.h"
 #include "deadlock_detector.h"
 
 // This function will run automatically when libmcmini.so is loaded.
@@ -1007,6 +1008,8 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
             update_thread_cv_state(cond_record->vo.cond_state.waiting_threads,thrd_record->vo.thrd_state.id,CV_WAITING);
           }
           libpthread_mutex_unlock(&rec_list_lock);
+          /* Notify deadlock detector that progress occurred - thread successfully waited/was signaled */
+          deadlock_detector_increment_progress();
           return rc;
         }
         else if (rc == ETIMEDOUT) {
@@ -1043,6 +1046,22 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
           if (is_in_restart_mode()) {
               break;
           }
+          /* Check if this thread was signaled while in CV_PREWAITING state */
+          libpthread_mutex_lock(&rec_list_lock);
+          condition_variable_status cv_state = get_thread_cv_state(cond_record->vo.cond_state.waiting_threads, thrd_record->vo.thrd_state.id);
+          if (cv_state == CV_SIGNALED) {
+            // Thread was signaled while in CV_PREWAITING, break out of loop
+            remove_thread_from_queue(cond_record->vo.cond_state.waiting_threads, thrd_record->vo.thrd_state.id);
+            cond_record->vo.cond_state.count--;
+            libpthread_mutex_unlock(&rec_list_lock);
+            /* Notify deadlock detector that progress occurred - thread was signaled while in CV_PREWAITING */
+            deadlock_detector_increment_progress();
+            return 0; // Successful wait (signaled)
+          }
+          libpthread_mutex_unlock(&rec_list_lock);
+          /* Notify deadlock detector that progress occurred - thread is actively retrying cond_wait 
+           * This prevents false positive deadlock detection during normal producer-consumer patterns */
+          deadlock_detector_increment_progress();
         } else if (rc != 0 && rc != ETIMEDOUT) {
           // A "true" error: something went wrong with locking
           // and we pass this on to the end user
@@ -1108,11 +1127,11 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
                 cond);
         libc_abort();
       }
-      // Store pre-signal waiting count (only count CV_WAITING threads)
+      // Store pre-signal waiting count (count both CV_WAITING and CV_PREWAITING threads)
       int cv_waiting_count = 0;
       thread_queue_node* current = cond_record->vo.cond_state.waiting_threads->front;
       while (current != NULL) {
-        if (current->thread_cv_state == CV_WAITING) {
+        if (current->thread_cv_state == CV_WAITING || current->thread_cv_state == CV_PREWAITING) {
           cv_waiting_count++;
         }
         current = current->next;
@@ -1123,9 +1142,21 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
       int rc = libpthread_cond_signal(cond);
       if (rc == 0) {
         libpthread_mutex_lock(&rec_list_lock);
+        // Try to find a thread in CV_WAITING state first, then CV_PREWAITING
         runner_id_t waiting_thread = get_waiting_thread_node(cond_record->vo.cond_state.waiting_threads);
+        if (waiting_thread == RID_INVALID && !is_queue_empty(cond_record->vo.cond_state.waiting_threads)) {
+          // No CV_WAITING threads found, look for CV_PREWAITING threads
+          current = cond_record->vo.cond_state.waiting_threads->front;
+          while (current != NULL) {
+            if (current->thread_cv_state == CV_PREWAITING) {
+              waiting_thread = current->thread;
+              break;
+            }
+            current = current->next;
+          }
+        }
         if (!is_queue_empty(cond_record->vo.cond_state.waiting_threads)) {
-           // Find first thread in CV_WAITING state
+           // Signal the first available thread (CV_WAITING or CV_PREWAITING)
            if (waiting_thread != RID_INVALID) {
             update_thread_cv_state(cond_record->vo.cond_state.waiting_threads, waiting_thread, CV_SIGNALED);
            }
