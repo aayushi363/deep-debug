@@ -39,6 +39,7 @@ class classic_dpor final : public algorithm {
 
     enum class exploration_policy : uint { round_robin, smallest_first };
     exploration_policy policy = exploration_policy::smallest_first;
+    bool stop_at_first_deadlock = false;
   };
 
   classic_dpor() = default;

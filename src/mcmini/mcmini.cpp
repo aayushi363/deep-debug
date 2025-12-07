@@ -251,6 +251,7 @@ void do_model_checking(const config& config) {
   mcconfig mc_config;
   mc_config.maximum_total_execution_depth =
       config.maximum_total_execution_depth;
+  mc_config.stop_at_first_deadlock = config.stop_at_first_deadlock;
   mc_config.policy = config.use_round_robin_scheduling
                          ? mcconfig::exploration_policy::round_robin
                          : mcconfig::exploration_policy::smallest_first;

@@ -232,8 +232,16 @@ void classic_dpor::verify_using(coordinator &coordinator,
     if (callbacks.trace_completed)
       callbacks.trace_completed(coordinator, model_checking_stats);
 
-    if (callbacks.deadlock &&
-        coordinator.get_current_program_model().is_in_deadlock())
+    if (config.stop_at_first_deadlock &&
+        coordinator.get_current_program_model().is_in_deadlock()) {
+      log_info(dpor_logger)
+          << "First deadlock found. Reporting and stopping model checking.";
+      if (callbacks.deadlock)
+        callbacks.deadlock(coordinator, model_checking_stats);
+
+      return;
+    } else if (callbacks.deadlock &&
+               coordinator.get_current_program_model().is_in_deadlock())
       callbacks.deadlock(coordinator, model_checking_stats);
 
     // 3. Backtrack phase
