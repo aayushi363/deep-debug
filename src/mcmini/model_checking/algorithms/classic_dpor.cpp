@@ -7,6 +7,7 @@
 #include <csignal>
 #include <cstddef>
 #include <iostream>
+#include <list>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -114,6 +115,9 @@ void classic_dpor::verify_using(coordinator &coordinator,
   /// The initial entry into the stack represents the information DPOR tracks
   /// for state `s_0`.
   log_debug(dpor_logger) << "Initializing the DPOR stack";
+  bool reached_max_depth = false;
+  std::list<runner_id_t> round_robin_sched;
+
   stats model_checking_stats;
   dpor_context context(coordinator);
   auto &dpor_stack = context.stack;
@@ -128,21 +132,67 @@ void classic_dpor::verify_using(coordinator &coordinator,
     // 2. Exploration phase
     while (dpor_stack.back().has_enabled_runners()) {
       if (dpor_stack.size() >= this->config.maximum_total_execution_depth) {
-        throw std::runtime_error(
-            "*** Execution Limit Reached! ***\n\n"
-            "McMini ran a trace with" +
-            std::to_string(dpor_stack.size()) +
-            " transitions which is\n"
-            "the more than McMini was configured to handle in any one trace (" +
-            std::to_string(this->config.maximum_total_execution_depth) +
-            "). Try running mcmini with the \"--max-depth-per-thread\" flag\n"
-            "to limit how far into a trace McMini can go\n");
+        if (!reached_max_depth) {
+          log_unexpected(dpor_logger)
+              << "*** Execution Limit Reached! ***\n\n"
+              << "McMini encountered a trace with" << dpor_stack.size()
+              << " transitions which is the most that McMini was configured"
+              << " to handle in any given trace ("
+              << this->config.maximum_total_execution_depth
+              << "). McMini will continue its search, but it may be "
+                 "incomplete. Rerun McMini with the "
+                 "\"--max-depth-per-thread\" "
+              << "flag for correct results.";
+        }
+        reached_max_depth = true;
+        break;
       }
       // NOTE: For deterministic results, always choose the "first" enabled
       // runner. A runner precedes another runner in being enabled iff it has a
       // smaller id.
       try {
-        const runner_id_t rid = dpor_stack.back().get_first_enabled_runner();
+        runner_id_t rid;
+        switch (config.policy) {
+        case configuration::exploration_policy::smallest_first: {
+          rid = dpor_stack.back().get_first_enabled_runner();
+          break;
+        }
+        case configuration::exploration_policy::round_robin: {
+          auto unscheduled_runners = dpor_stack.back().get_enabled_runners();
+
+          // For round robin scheduling, always prefer to schedule
+          // threads that don't appear in `round_robin_sched` because
+          // these threads are necessarily unscheduled wrt the previous starting
+          // point.
+          //
+          // 1. Among those threads not appearing in the round robin
+          // schedule, always pick the smallest.
+          // 2. If every enabled thread has already been scheduled, then pick
+          // the first based on the round robin schedule and move it to the back
+          // of the list. NOTE: Every enabled runner is in `round_robin_sched`,
+          // but the converse is not necessarily true (i.e. there may be threads
+          // in `round_robin_sched` that aren't enabled)
+          for (const runner_id_t id : round_robin_sched) {
+            unscheduled_runners.erase(id);
+          }
+          if (!unscheduled_runners.empty()) {
+            rid = *std::min_element(unscheduled_runners.begin(),
+                                    unscheduled_runners.end());
+            round_robin_sched.push_back(rid);
+          } else {
+            auto it =
+                std::find_if(round_robin_sched.begin(), round_robin_sched.end(),
+                             [&](const runner_id_t id) {
+                               return dpor_stack.back().is_enabled(id);
+                             });
+            assert(it != round_robin_sched.end());
+            round_robin_sched.splice(round_robin_sched.end(), round_robin_sched,
+                                     it);
+            rid = *it;
+          }
+        }
+        }
+
         this->continue_dpor_by_expanding_trace_with(rid, context);
         model_checking_stats.total_transitions++;
 
@@ -223,6 +273,23 @@ void classic_dpor::verify_using(coordinator &coordinator,
       try {
         this->continue_dpor_by_expanding_trace_with(
             dpor_stack.back().backtrack_set_pop_first(), context);
+
+        // If we're doing round robin scheduling for expanding the trace,
+        // backtracking forces a restart of the round robin process.
+        // Intuitively, this makes sense: round robin only applies when
+        // searching _new_ traces. However, we could be a little more
+        // intelligent here and resume the round robin from where it _should_
+        // continue, but that's a little more complicated.
+        //
+        // That is, if the trace after backtracking is e.g.
+        //
+        // 1, 2, 3, 1, 2, _2_
+        //
+        // where _2_ was inserted as a backtrack point, then we could notice
+        // that _3_ was technically supposed to be next in the round robin
+        // scheduling. The current method would schedule 1, then 2, then 3, ...
+        // since we only account for scheduling that occurs during _expansion_.
+        round_robin_sched.clear();
       } catch (const model::undefined_behavior_exception &ube) {
         if (callbacks.undefined_behavior)
           callbacks.undefined_behavior(coordinator, model_checking_stats, ube);

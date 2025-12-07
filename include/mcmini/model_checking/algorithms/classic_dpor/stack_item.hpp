@@ -233,6 +233,9 @@ struct stack_item final {
     }
     return r;
   }
+  const bool is_enabled(runner_id_t rid) {
+    return this->enabled_runners.count(rid) > 0;
+  }
   const std::unordered_set<runner_id_t> &get_enabled_runners() const {
     return this->enabled_runners;
   }

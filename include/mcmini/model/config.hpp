@@ -13,15 +13,26 @@ namespace model {
 struct config {
   /**
    * The maximum number of transitions that can be run
-   * by any single thread while running the model checker
+   * by any _single thread_ while running the model checker
    */
   uint64_t max_thread_execution_depth;
+
+  /**
+   * The maximum number of transitions that can be contained in any given trace.
+   */
+  uint64_t maximum_total_execution_depth = 1500;
 
   /**
    * The trace id to stop the model checker at
    * to print the contents of the transition stack
    */
   trid_t target_trace_id;
+
+  /**
+   * Whether or not exploration occurs using round robin scheduling (default is
+   * smallest tid first)
+   */
+  bool use_round_robin_scheduling = false;
 
   /**
    * Whether model checking should halt at the first encountered deadlock
@@ -63,4 +74,4 @@ struct config {
   // file path is provided (TODO).
   logging::severity_level global_severity_level = logging::severity_level::info;
 };
-}  // namespace model
+} // namespace model

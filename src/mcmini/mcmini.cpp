@@ -247,7 +247,15 @@ void do_model_checking(const config& config) {
   std::cerr << "\n\n**************** INTIAL STATE *********************\n\n";
   std::cerr.flush();
 
-  model_checking::classic_dpor classic_dpor_checker;
+  using mcconfig = model_checking::classic_dpor::configuration;
+  mcconfig mc_config;
+  mc_config.maximum_total_execution_depth =
+      config.maximum_total_execution_depth;
+  mc_config.policy = config.use_round_robin_scheduling
+                         ? mcconfig::exploration_policy::round_robin
+                         : mcconfig::exploration_policy::smallest_first;
+
+  model_checking::classic_dpor classic_dpor_checker(std::move(mc_config));
   c.trace_completed = &finished_trace_classic_dpor;
   c.deadlock = &found_deadlock;
   c.undefined_behavior = &found_undefined_behavior;
@@ -456,9 +464,20 @@ int main_cpp(int argc, const char** argv) {
       mcmini_config.max_thread_execution_depth =
           strtoul(cur_arg[1], nullptr, 10);
 
-      char* endptr;
+      char *endptr;
       if (strtol(cur_arg[1], &endptr, 10) == 0 || endptr[0] != '\0') {
         fprintf(stderr, "%s: illegal value\n", "--max-depth-per-thread");
+        exit(1);
+      }
+      cur_arg += 2;
+    } else if (strcmp(cur_arg[0], "--max-depth-per-trace") == 0 ||
+               strcmp(cur_arg[0], "-M") == 0) {
+      mcmini_config.maximum_total_execution_depth =
+          strtoul(cur_arg[1], nullptr, 10);
+
+      char *endptr;
+      if (strtol(cur_arg[1], &endptr, 10) == 0 || endptr[0] != '\0') {
+        fprintf(stderr, "%s: illegal value\n", "--max-depth-per-trace");
         exit(1);
       }
       cur_arg += 2;
@@ -468,6 +487,10 @@ int main_cpp(int argc, const char** argv) {
       mcmini_config.checkpoint_period =
           std::chrono::seconds(strtoul(cur_arg[1], nullptr, 10));
       cur_arg += 2;
+    } else if ((strcmp(cur_arg[0], "--round-robin") == 0) ||
+               strcmp(cur_arg[0], "-rr") == 0) {
+      mcmini_config.use_round_robin_scheduling = true;
+      cur_arg += 1;
     } else if (strcmp(cur_arg[0], "--from-checkpoint") == 0 ||
                strcmp(cur_arg[0], "-ckpt") == 0) {
       mcmini_config.checkpoint_file = cur_arg[1];
@@ -512,7 +535,9 @@ int main_cpp(int argc, const char** argv) {
           "              [--record|-r <seconds>] \n"
           "              [--from-checkpoint <ckpt>] [--multithreaded-fork] \n"
           "              [--max-depth-per-thread|-m <num>]\n"
+          "              [--max-depth-per-trace|-M <num>]\n"
           "              [--first-deadlock|--first|-f]\n"
+          "              [--round-robin|-rr]\n"
           "              [--log-level|-log <level>]\n"
           "              [--help|-h]\n"
           "              target_executable\n");
@@ -562,10 +587,10 @@ int main_cpp(int argc, const char** argv) {
   return EXIT_SUCCESS;
 }
 
-int main(int argc, const char** argv) {
+int main(int argc, const char **argv) {
   try {
     return main_cpp(argc, argv);
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "ERROR: " << e.what() << std::endl;
     return EXIT_FAILURE;
   } catch (...) {

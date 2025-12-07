@@ -36,12 +36,15 @@ class classic_dpor final : public algorithm {
         classic_dpor::default_coenabledness();
     uint32_t maximum_total_execution_depth = 1500;
     bool assumes_linear_program_flow = false;
+
+    enum class exploration_policy : uint { round_robin, smallest_first };
+    exploration_policy policy = exploration_policy::smallest_first;
   };
 
   classic_dpor() = default;
   classic_dpor(configuration config) : config(std::move(config)) {}
 
- private:
+private:
   configuration config;
 
   bool are_dependent(const model::transition &t1,
