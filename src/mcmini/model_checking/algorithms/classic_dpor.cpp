@@ -45,6 +45,29 @@ struct classic_dpor::dpor_context {
   const transition *get_transition(int i) const {
     return stack.at(i).get_out_transition();
   }
+
+  bool happens_before(size_t i, size_t j) const {
+    const runner_id_t rid = stack.at(i).get_out_transition()->get_executor();
+    const clock_vector &cv = stack.at(j).get_clock_vector();
+    return i <= cv.value_for(rid);
+  }
+
+  bool happens_before_thread(size_t i, runner_id_t p) const {
+    const runner_id_t rid = get_transition(i)->get_executor();
+    const clock_vector &cv =
+        stack.back().get_per_runner_clocks()[p].get_clock_vector();
+    return i <= cv.value_for(rid);
+  }
+
+  bool threads_race_after(size_t i, runner_id_t q, runner_id_t p) const {
+    const size_t transition_stack_height = stack.size() - 1;
+    for (size_t j = i + 1; j < transition_stack_height; j++) {
+      if (q == get_transition(j)->get_executor() &&
+          this->happens_before_thread(j, p))
+        return true;
+    }
+    return false;
+  }
 };
 
 clock_vector classic_dpor::accumulate_max_clock_vector_against(
@@ -75,37 +98,10 @@ bool classic_dpor::are_dependent(const model::transition &t1,
          this->config.dependency_relation.call_or(true, &t1, &t2);
 }
 
-bool classic_dpor::happens_before(const dpor_context &context, size_t i,
-                                  size_t j) const {
-  const runner_id_t rid =
-      context.stack.at(i).get_out_transition()->get_executor();
-  const clock_vector &cv = context.stack.at(j).get_clock_vector();
-  return i <= cv.value_for(rid);
-}
-
-bool classic_dpor::happens_before_thread(const dpor_context &context, size_t i,
-                                         runner_id_t p) const {
-  const runner_id_t rid = context.get_transition(i)->get_executor();
-  const clock_vector &cv =
-      context.stack.back().get_per_runner_clocks()[p].get_clock_vector();
-  return i <= cv.value_for(rid);
-}
-
-bool classic_dpor::threads_race_after(const dpor_context &context, size_t i,
-                                      runner_id_t q, runner_id_t p) const {
-  const size_t transition_stack_height = context.stack.size() - 1;
-  for (size_t j = i + 1; j < transition_stack_height; j++) {
-    if (q == context.get_transition(j)->get_executor() &&
-        this->happens_before_thread(context, j, p))
-      return true;
-  }
-  return false;
-}
-
 void classic_dpor::verify_using(coordinator &coordinator,
                                 const callbacks &callbacks) {
   // The code below is an implementation of the model-checking algorithm of
-  // Flanagan and Godefroid from 2015.
+  // Flanagan and Godefroid from 2005.
 
   // 1. Data structure set up
 
@@ -238,7 +234,6 @@ void classic_dpor::verify_using(coordinator &coordinator,
           << "First deadlock found. Reporting and stopping model checking.";
       if (callbacks.deadlock)
         callbacks.deadlock(coordinator, model_checking_stats);
-
       return;
     } else if (callbacks.deadlock &&
                coordinator.get_current_program_model().is_in_deadlock())
@@ -483,17 +478,18 @@ bool classic_dpor::dynamically_update_backtrack_sets_at_index(
   // TODO: add in co-enabled conditions
   const bool has_reversible_race = this->are_dependent(next_sp, S_i) &&
                                    this->are_coenabled(next_sp, S_i) &&
-                                   !this->happens_before_thread(context, i, p);
+                                   !context.happens_before_thread(i, p);
 
   // If there exists i such that ...
   if (has_reversible_race) {
     std::set<runner_id_t> e;
 
     for (runner_id_t const q : pre_si.get_enabled_runners()) {
-      const bool in_e = q == p || this->threads_race_after(context, i, q, p);
+      const bool in_e = q == p || context.threads_race_after(i, q, p);
 
       // If E != empty set
-      if (in_e && !pre_si.sleep_set_contains(q)) e.insert(q);
+      if (in_e && !pre_si.sleep_set_contains(q))
+        e.insert(q);
     }
 
     if (e.empty()) {

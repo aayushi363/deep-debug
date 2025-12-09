@@ -12,7 +12,7 @@ namespace model_checking {
  * algorithm of Flanagan and Godefroid (2005).
  */
 class classic_dpor final : public algorithm {
- public:
+public:
   using dependency_relation_type =
       double_dispatch_member_function_table<const model::transition,
                                             bool(void)>;
@@ -63,13 +63,6 @@ private:
   // the DPOR algorithm and are called at specific points in time!
 
   struct dpor_context;
-
-  bool happens_before(const dpor_context &, size_t i, size_t j) const;
-  bool happens_before_thread(const dpor_context &, size_t i,
-                             runner_id_t p) const;
-  bool threads_race_after(const dpor_context &context, size_t i, runner_id_t q,
-                          runner_id_t p) const;
-
   clock_vector accumulate_max_clock_vector_against(const model::transition &,
                                                    const dpor_context &) const;
 
@@ -83,4 +76,4 @@ private:
       runner_id_t p);
 };
 
-}  // namespace model_checking
+} // namespace model_checking
