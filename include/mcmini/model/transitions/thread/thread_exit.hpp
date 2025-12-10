@@ -21,6 +21,7 @@ public:
     s.add_state_for_runner(executor, new thread(thread::exited));
     return status::exists;
   }
+  bool depends(const model::transition *t) const { return false; }
 
   std::string to_string() const override { return "exits"; }
 };

@@ -520,6 +520,10 @@ classic_dpor::dependency_relation_type classic_dpor::default_dependencies() {
       &transitions::thread_create::depends);
   dr.register_dd_entry<const transitions::thread_join>(
       &transitions::thread_join::depends);
+  dr.register_dd_entry<const transitions::thread_start>(
+      &transitions::thread_start::depends);
+  dr.register_dd_entry<const transitions::thread_exit>(
+      &transitions::thread_exit::depends);
   dr.register_dd_entry<const transitions::mutex_lock,
                        const transitions::mutex_init>(
       &transitions::mutex_lock::depends);

@@ -7,19 +7,20 @@ namespace model {
 namespace transitions {
 
 struct thread_start : public model::transition {
- public:
+public:
   thread_start(state::runner_id_t executor) : transition(executor) {}
   ~thread_start() = default;
 
-  status modify(model::mutable_state& s) const override {
+  status modify(model::mutable_state &s) const override {
     // No modification necessary: we simply move into the next state
     using namespace model::objects;
-    auto* thread_state = s.get_state_of_runner<thread>(executor);
+    auto *thread_state = s.get_state_of_runner<thread>(executor);
     return thread_state->is_embryo() ? status::disabled : status::exists;
   }
+  bool depends(const model::transition *t) const { return false; }
 
   std::string to_string() const override { return "starts"; }
 };
 
-}  // namespace transitions
-}  // namespace model
+} // namespace transitions
+} // namespace model
