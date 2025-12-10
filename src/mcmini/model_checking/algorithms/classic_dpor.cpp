@@ -68,6 +68,8 @@ struct classic_dpor::dpor_context {
     }
     return false;
   }
+  std::vector<const transition *> linearize_lowest_first();
+  std::vector<const transition *> linearize_greedy() { return {}; }
 };
 
 clock_vector classic_dpor::accumulate_max_clock_vector_against(
@@ -139,13 +141,10 @@ void classic_dpor::verify_using(coordinator &coordinator,
                  "incomplete. Rerun McMini with the "
                  "\"--max-depth-per-thread\" "
               << "flag for correct results.";
+          reached_max_depth = true;
         }
-        reached_max_depth = true;
         break;
       }
-      // NOTE: For deterministic results, always choose the "first" enabled
-      // runner. A runner precedes another runner in being enabled iff it has a
-      // smaller id.
       try {
         runner_id_t rid;
         switch (config.policy) {
@@ -573,4 +572,185 @@ classic_dpor::coenabled_relation_type classic_dpor::default_coenabledness() {
                        const transitions::condition_variable_signal>(
       &transitions::condition_variable_destroy::coenabled_with);
   return cr;
+}
+
+std::vector<const transition *>
+classic_dpor::dpor_context::linearize_lowest_first() {
+  if (this->stack.empty())
+    return {};
+
+  // N = number of _transitions_ in the stack
+  // Each element is one _state_, so there's one
+  // less transition
+  const size_t N = this->stack.size() - 1;
+
+  // --- Phase 1 ---
+  // Dependency Graph Construction
+  //
+  //
+  // `adj_list` holds the dependencies between every point in the trace. Nodes
+  // are representing using integers and correspond to the index in the
+  // transition stack.
+  //
+  // `e in adj_list[i] <--> happens_before(i, e)`.
+  //
+  // NOTE: For each `i`, the nodes are ordered in topological order. This is
+  // because the transitions in the stack are already topologically ordered by
+  // construction, and we process nodes in order.
+  std::vector<std::vector<int>> adj_list(N);
+  std::vector<std::vector<bool>> redundant(N);
+
+  for (size_t i = 0; i < N; i++) {
+    for (size_t j = i + 1; j < N; j++) {
+      if (happens_before(i, j)) {
+        adj_list[i].push_back(j);
+        redundant[i].push_back(true);
+      }
+    }
+  }
+
+  // --- Phase 2 ---
+  // Compute Chain Decomposition
+  //
+  // Decomposes the DAG into a minimum number of disjoint paths (chains).
+  std::vector<bool> unmarked(N, true);
+  std::vector<int> chain_id(N);  // chain_id[v]: index of the chain containing v
+  std::vector<std::list<int>> C; // C[h]: list of nodes in chain h
+
+  // Iterating in increasing topological order (see note above)
+  for (size_t v = 0; v < N; ++v) {
+    if (unmarked[v]) {
+      C.emplace_back(); // Start a new chain
+      int current_chain_id = C.size() - 1;
+      int current_node = v;
+
+      while (current_node != -1) {
+        C.back().push_back(current_node);
+        chain_id[current_node] = current_chain_id;
+        unmarked[current_node] = false;
+
+        int next_node = -1;
+        // Find the first unmarked neighbor 'w' (smallest topological rank)
+        for (int w : adj_list[current_node]) {
+          if (unmarked[w]) {
+            next_node = w;
+            break;
+          }
+        }
+        current_node = next_node;
+      }
+    }
+  }
+
+  // --- Phase 2: Compute Reachability and Redundancy ---
+  // reach[i][c]: min{j ; node j in C[c] and path i -> j exists}
+  // where "<" refers to topological order
+  //
+  // Intuitively, `reach[i][c]` denotes the "smallest" (topologically-speaking)
+  // node in chain `c` that has a path to node `i`.
+  const int num_chains = C.size();
+  const int INF = N + 1;
+  std::vector<std::vector<int>> reach(N, std::vector<int>(num_chains, INF));
+
+  // The key loop: iterates in DECREASING topological order
+  for (size_t k = 0; k <= N - 1; k++) {
+    size_t v = N - k - 1;
+    auto &reach_v = reach[v];
+
+    // Process outgoing edges of v (target 'w' is in INCREASING order)
+    for (int w : adj_list[v]) {
+      if (w < reach_v[chain_id[w]]) {
+        redundant[v][w] = false;
+
+        // Update reach[i] using reach[j]:
+        // If v can reach w via a non-redundant edge, v can reach everything j
+        // reaches.
+        for (int c = 0; c < num_chains; ++c)
+          reach_v[c] = std::min(reach_v[c], reach[w][c]);
+      }
+    }
+    reach_v[chain_id[v]] = v;
+  }
+
+  // --- Phase 3 ---
+  // Remove redundant edges from the adjacency list
+  for (size_t k = 0; k < N; k++) {
+    auto &out_edges = adj_list[k];
+    auto &redundant_edges = redundant[k];
+    size_t j = 0;
+    for (size_t i = 0; i < out_edges.size(); ++i)
+      if (redundant_edges[i])
+        out_edges[j++] = out_edges[i];
+    out_edges.resize(j);
+  }
+
+  // --- Phase 4 ---
+  // Topological Sort and Final Processing
+  // Generate a topological sort using the newly reduced dependency graph
+  std::vector<int> linearization;
+  std::vector<int> ready_set; // Indicies into the transition stack
+  std::vector<int> in_degree(N, 0);
+  for (size_t u = 0; u < N; ++u)
+    for (int v : adj_list[u])
+      in_degree[v]++;
+
+  for (size_t i = 0; i < N; ++i)
+    if (in_degree[i] == 0)
+      ready_set.push_back(i);
+
+  runner_id_t last_rid = -1; // -1 indicates no last rid
+  while (!ready_set.empty()) {
+    int next_vertex = -1;
+    int selected_index = -1;
+
+    // Find the vertex with the same executor as the last one
+    if (last_rid != -1) {
+      for (size_t i = 0; i < ready_set.size(); ++i) {
+        const runner_id_t r =
+            stack.at(ready_set[i]).get_out_transition()->get_executor();
+        if (r == last_rid) {
+          next_vertex = ready_set[i];
+          selected_index = i;
+          break; // Found the best greedy match that avoids inversion
+        }
+      }
+    }
+
+    // If no color match, or at the start, pick the thread with the lowest id
+    if (next_vertex == -1) {
+      // INVARIANT: Since mid_rid
+      runner_id_t min_rid = RID_INVALID;
+      for (size_t i = 0; i < ready_set.size(); ++i) {
+        const runner_id_t r =
+            stack.at(ready_set[i]).get_out_transition()->get_executor();
+        if (r < min_rid) {
+          next_vertex = ready_set[i];
+          selected_index = i;
+        }
+      }
+    }
+
+    linearization.push_back(next_vertex);
+    last_rid = stack.at(next_vertex).get_out_transition()->get_executor();
+
+    // Remove the selected vertex from the ready set
+    // Swap with the back and pop for O(1) removal from vector (since order in S
+    // doesn't matter)
+    std::swap(ready_set[selected_index], ready_set.back());
+    ready_set.pop_back();
+
+    for (int v : adj_list[next_vertex]) {
+      in_degree[v]--;
+      if (in_degree[v] == 0) {
+        ready_set.push_back(v);
+      }
+    }
+  }
+
+  // --- Phase 5 ---
+  // Convert the linearization into a transition trace
+  std::vector<const transition *> linearized_trace(N);
+  for (size_t i = 0; i < N; i++)
+    linearized_trace[i] = stack.at(linearization[i]).get_out_transition();
+  return linearized_trace;
 }
