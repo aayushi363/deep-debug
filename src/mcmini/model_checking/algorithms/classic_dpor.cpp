@@ -47,8 +47,8 @@ struct classic_dpor::dpor_context {
   }
 
   bool happens_before(size_t i, size_t j) const {
-    const runner_id_t rid = stack.at(i).get_out_transition()->get_executor();
-    const clock_vector &cv = stack.at(j).get_clock_vector();
+    const runner_id_t rid = get_transition(i)->get_executor();
+    const clock_vector &cv = stack.at(j + 1).get_clock_vector();
     return i <= cv.value_for(rid);
   }
 
