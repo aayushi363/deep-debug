@@ -42,14 +42,28 @@ struct classic_dpor::dpor_context {
 
   dpor_context(::coordinator &c) : coordinator(c) {}
 
+public:
+  const size_t state_stack_size() const { return stack.size(); }
+  const size_t transition_stack_size() const {
+    size_t ss = state_stack_size();
+    return ss > 1 ? (ss - 1) : 0;
+  }
+
   const transition *get_transition(int i) const {
     return stack.at(i).get_out_transition();
   }
 
+  const clock_vector &clock(size_t j) const {
+    // C(j) in the DPOR paper
+    // NOTE: The clock vector for the `i`th transition is stored in the state
+    // into which the transition points, NOT the state from which the transition
+    // starts (hence the j + 1)
+    return stack.at(j + 1).get_clock_vector();
+  }
+
   bool happens_before(size_t i, size_t j) const {
-    const runner_id_t rid = get_transition(i)->get_executor();
-    const clock_vector &cv = stack.at(j + 1).get_clock_vector();
-    return i <= cv.value_for(rid);
+    const runner_id_t procSi = get_transition(i)->get_executor();
+    return i <= clock(j).value_for(procSi);
   }
 
   bool happens_before_thread(size_t i, runner_id_t p) const {
@@ -79,11 +93,10 @@ clock_vector classic_dpor::accumulate_max_clock_vector_against(
   // (case-sensitive) in the paper, viz. the transition between states `s_i` and
   // `s_{i+1}`.
   clock_vector result;
-  for (const stack_item &s_i : context.stack) {
-    if (s_i.get_out_transition() != nullptr &&
-        this->are_dependent(*s_i.get_out_transition(), t)) {
-      result = clock_vector::max(result, s_i.get_clock_vector());
-    }
+  for (size_t i = 0; i < context.transition_stack_size(); i++) {
+    const model::transition *S_i = context.get_transition(i);
+    if (this->are_dependent(*S_i, t))
+      result = clock_vector::max(result, context.clock(i));
   }
   return result;
 }
