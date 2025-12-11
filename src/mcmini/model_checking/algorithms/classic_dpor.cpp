@@ -528,62 +528,51 @@ bool classic_dpor::dynamically_update_backtrack_sets_at_index(
 
 classic_dpor::dependency_relation_type classic_dpor::default_dependencies() {
   classic_dpor::dependency_relation_type dr;
-  dr.register_dd_entry<const transitions::thread_create>(
-      &transitions::thread_create::depends);
-  dr.register_dd_entry<const transitions::thread_join>(
-      &transitions::thread_join::depends);
-  dr.register_dd_entry<const transitions::thread_start>(
-      &transitions::thread_start::depends);
-  dr.register_dd_entry<const transitions::thread_exit>(
-      &transitions::thread_exit::depends);
-  dr.register_dd_entry<const transitions::mutex_lock,
-                       const transitions::mutex_init>(
-      &transitions::mutex_lock::depends);
-  dr.register_dd_entry<const transitions::mutex_lock,
-                       const transitions::mutex_lock>(
-      &transitions::mutex_lock::depends);
-  dr.register_dd_entry<const transitions::condition_variable_wait,
-                       const transitions::condition_variable_init>(
-      &transitions::condition_variable_wait::depends);
-  dr.register_dd_entry<const transitions::condition_variable_wait,
-                       const transitions::mutex_lock>(
-      &transitions::condition_variable_wait::depends);
-  dr.register_dd_entry<const transitions::condition_variable_signal,
-                       const transitions::condition_variable_wait>(
-      &transitions::condition_variable_signal::depends);
-  dr.register_dd_entry<const transitions::condition_variable_signal,
-                       const transitions::mutex_lock>(
-      &transitions::condition_variable_signal::depends);
+  using namespace transitions;
+  dr.register_dd_entry<const thread_create>(&thread_create::depends);
+  dr.register_dd_entry<const thread_join>(&thread_join::depends);
+  dr.register_dd_entry<const thread_start>(&thread_start::depends);
+  dr.register_dd_entry<const thread_exit>(&thread_exit::depends);
+  dr.register_dd_entry<const mutex_lock, const mutex_init>(
+      &mutex_lock::depends);
+  dr.register_dd_entry<const mutex_lock, const mutex_lock>(
+      &mutex_lock::depends);
+  dr.register_dd_entry<const condition_variable_wait,
+                       const condition_variable_init>(
+      &condition_variable_wait::depends);
+  dr.register_dd_entry<const condition_variable_wait, const mutex_lock>(
+      &condition_variable_wait::depends);
+  dr.register_dd_entry<const condition_variable_signal,
+                       const condition_variable_wait>(
+      &condition_variable_signal::depends);
+  dr.register_dd_entry<const condition_variable_signal, const mutex_lock>(
+      &condition_variable_signal::depends);
   return dr;
 }
 
 classic_dpor::coenabled_relation_type classic_dpor::default_coenabledness() {
+  using namespace transitions;
   classic_dpor::dependency_relation_type cr;
-  cr.register_dd_entry<const transitions::thread_create>(
-      &transitions::thread_create::coenabled_with);
-  cr.register_dd_entry<const transitions::thread_join>(
-      &transitions::thread_join::coenabled_with);
-  cr.register_dd_entry<const transitions::mutex_lock,
-                       const transitions::mutex_unlock>(
-      &transitions::mutex_lock::coenabled_with);
-  cr.register_dd_entry<const transitions::condition_variable_signal,
-                       const transitions::condition_variable_wait>(
-      &transitions::condition_variable_signal::coenabled_with);
-  cr.register_dd_entry<const transitions::condition_variable_signal,
-                       const transitions::mutex_unlock>(
-      &transitions::condition_variable_signal::coenabled_with);
-  cr.register_dd_entry<const transitions::condition_variable_broadcast,
-                       const transitions::condition_variable_wait>(
-      &transitions::condition_variable_broadcast::coenabled_with);
-  cr.register_dd_entry<const transitions::condition_variable_broadcast,
-                       const transitions::mutex_unlock>(
-      &transitions::condition_variable_broadcast::coenabled_with);
-  cr.register_dd_entry<const transitions::condition_variable_destroy,
-                       const transitions::condition_variable_wait>(
-      &transitions::condition_variable_destroy::coenabled_with);
-  cr.register_dd_entry<const transitions::condition_variable_destroy,
-                       const transitions::condition_variable_signal>(
-      &transitions::condition_variable_destroy::coenabled_with);
+  cr.register_dd_entry<const thread_create>(&thread_create::coenabled_with);
+  cr.register_dd_entry<const thread_join>(&thread_join::coenabled_with);
+  cr.register_dd_entry<const mutex_lock, const mutex_unlock>(
+      &mutex_lock::coenabled_with);
+  cr.register_dd_entry<const condition_variable_signal,
+                       const condition_variable_wait>(
+      &condition_variable_signal::coenabled_with);
+  cr.register_dd_entry<const condition_variable_signal, const mutex_unlock>(
+      &condition_variable_signal::coenabled_with);
+  cr.register_dd_entry<const condition_variable_broadcast,
+                       const condition_variable_wait>(
+      &condition_variable_broadcast::coenabled_with);
+  cr.register_dd_entry<const condition_variable_broadcast, const mutex_unlock>(
+      &condition_variable_broadcast::coenabled_with);
+  cr.register_dd_entry<const condition_variable_destroy,
+                       const condition_variable_wait>(
+      &condition_variable_destroy::coenabled_with);
+  cr.register_dd_entry<const condition_variable_destroy,
+                       const condition_variable_signal>(
+      &condition_variable_destroy::coenabled_with);
   return cr;
 }
 
