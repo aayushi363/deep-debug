@@ -430,7 +430,8 @@ void classic_dpor::dynamically_update_backtrack_sets(dpor_context &context) {
       coordinator.get_current_program_model().get_num_runners();
 
   std::set<runner_id_t> thread_ids;
-  for (runner_id_t i = 0; i < num_threads; i++) thread_ids.insert(i);
+  for (runner_id_t i = 0; i < num_threads; i++)
+    thread_ids.insert(i);
 
   const ssize_t t_stack_top = (ssize_t)(context.stack.size()) - 2;
   const runner_id_t last_runner_to_execute =
@@ -478,7 +479,8 @@ void classic_dpor::dynamically_update_backtrack_sets(dpor_context &context) {
        * will be the maxmimum `i` since we're searching
        * backwards
        */
-      if (should_stop) break;
+      if (should_stop)
+        break;
     }
   }
 }
@@ -516,7 +518,8 @@ bool classic_dpor::dynamically_update_backtrack_sets_at_index(
         // in the set E, chose that thread to backtrack
         // on. This is equivalent to not having to do
         // anything
-        if (pre_si.backtrack_set_contains(q)) return true;
+        if (pre_si.backtrack_set_contains(q))
+          return true;
       }
 
       // Otherwise select an arbitrary thread to backtrack upon.
@@ -657,21 +660,21 @@ classic_dpor::dpor_context::linearize_lowest_first() {
   // The key loop: iterates in DECREASING topological order
   for (size_t k = 0; k <= N - 1; k++) {
     size_t v = N - k - 1;
-    auto &reach_v = reach[v];
 
     // Process outgoing edges of v (target 'w' is in INCREASING order)
-    for (int w : adj_list[v]) {
-      if (w < reach_v[chain_id[w]]) {
-        redundant[v][w] = false;
+    for (size_t i = 0; i < adj_list[v].size(); i++) {
+      const int w = adj_list[v][i];
+      if (w < reach[v][chain_id[w]]) {
+        redundant[v][i /* INDEX of w */] = false;
 
         // Update reach[i] using reach[j]:
         // If v can reach w via a non-redundant edge, v can reach everything j
         // reaches.
         for (int c = 0; c < num_chains; ++c)
-          reach_v[c] = std::min(reach_v[c], reach[w][c]);
+          reach[v][c] = std::min(reach[v][c], reach[w][c]);
       }
     }
-    reach_v[chain_id[v]] = v;
+    reach[v][chain_id[v]] = v;
   }
 
   // --- Phase 3 ---
@@ -679,12 +682,31 @@ classic_dpor::dpor_context::linearize_lowest_first() {
   for (size_t k = 0; k < N; k++) {
     auto &out_edges = adj_list[k];
     auto &redundant_edges = redundant[k];
+    assert(out_edges.size() == redundant_edges.size());
     size_t j = 0;
     for (size_t i = 0; i < out_edges.size(); ++i)
-      if (redundant_edges[i])
+      if (!redundant_edges[i])
         out_edges[j++] = out_edges[i];
     out_edges.resize(j);
   }
+
+#if DEBUG
+  // Validation: every point in the adjacency list happens before
+  for (size_t i = 0; i < N; i++)
+    for (size_t j = i + 1; j < N; j++)
+      if (std::find(adj_list[i].begin(), adj_list[i].end(), j) !=
+          adj_list[i].end()) {
+        assert(happens_before(i, j));
+      } else {
+        if (happens_before(i, j)) {
+
+          auto s = std::find_if(adj_list[i].begin(), adj_list[i].end(),
+                                [&](int w) { return happens_before(w, j); });
+          assert(s != adj_list[i].end());
+        }
+        // Not in adj so ok in `false` case
+      }
+#endif
 
   // --- Phase 4 ---
   // Topological Sort and Final Processing
@@ -700,16 +722,15 @@ classic_dpor::dpor_context::linearize_lowest_first() {
     if (in_degree[i] == 0)
       ready_set.push_back(i);
 
-  runner_id_t last_rid = -1; // -1 indicates no last rid
+  runner_id_t last_rid = RUNNER_ID_MAX; // -1 indicates no last rid
   while (!ready_set.empty()) {
     int next_vertex = -1;
     int selected_index = -1;
 
     // Find the vertex with the same executor as the last one
-    if (last_rid != -1) {
+    if (last_rid != RUNNER_ID_MAX) {
       for (size_t i = 0; i < ready_set.size(); ++i) {
-        const runner_id_t r =
-            stack.at(ready_set[i]).get_out_transition()->get_executor();
+        const runner_id_t r = get_transition(ready_set[i])->get_executor();
         if (r == last_rid) {
           next_vertex = ready_set[i];
           selected_index = i;
@@ -723,11 +744,11 @@ classic_dpor::dpor_context::linearize_lowest_first() {
       // INVARIANT: Since mid_rid
       runner_id_t min_rid = RID_INVALID;
       for (size_t i = 0; i < ready_set.size(); ++i) {
-        const runner_id_t r =
-            stack.at(ready_set[i]).get_out_transition()->get_executor();
+        const runner_id_t r = get_transition(ready_set[i])->get_executor();
         if (r < min_rid) {
           next_vertex = ready_set[i];
           selected_index = i;
+          min_rid = r;
         }
       }
     }
@@ -751,8 +772,8 @@ classic_dpor::dpor_context::linearize_lowest_first() {
 
   // --- Phase 5 ---
   // Convert the linearization into a transition trace
-  std::vector<const transition *> linearized_trace(N);
+  std::vector<const transition *> linearized_trace(N, nullptr);
   for (size_t i = 0; i < N; i++)
-    linearized_trace[i] = stack.at(linearization[i]).get_out_transition();
+    linearized_trace[i] = get_transition(linearization[i]);
   return linearized_trace;
 }
