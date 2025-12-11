@@ -155,20 +155,21 @@ struct double_dispatch_member_function_table<InterfaceType,
                        unspecified_callback_handle);
   }
 
-  ReturnType call_or(ReturnType fallback, InterfaceType* t1, InterfaceType* t2,
+  ReturnType call_or(ReturnType fallback, InterfaceType *t1, InterfaceType *t2,
                      Args... args) const {
     const auto t1_type = std::type_index(typeid(*t1));
     const auto t2_type = std::type_index(typeid(*t2));
     if (internal_table.count(t1_type) > 0) {
       if (internal_table.at(t1_type).count(t2_type) > 0) {
-        const auto& pair = internal_table.at(t1_type).at(t2_type);
+        const auto &pair = internal_table.at(t1_type).at(t2_type);
         return pair.first(t1, t2, pair.second, std::forward<Args>(args)...);
       }
-    } else if (interface_member_function_table.count(t1_type) > 0) {
-      const auto& pair = interface_member_function_table.at(t1_type);
+    }
+    if (interface_member_function_table.count(t1_type) > 0) {
+      const auto &pair = interface_member_function_table.at(t1_type);
       return pair.first(t1, t2, pair.second, std::forward<Args>(args)...);
     } else if (interface_member_function_table.count(t2_type) > 0) {
-      const auto& pair = interface_member_function_table.at(t2_type);
+      const auto &pair = interface_member_function_table.at(t2_type);
       // NOTE: t2 should come before t1 here since
       // `casting_function_interface_table` always casts its first argument
       return pair.first(t2, t1, pair.second, std::forward<Args>(args)...);
@@ -176,12 +177,12 @@ struct double_dispatch_member_function_table<InterfaceType,
     return fallback;
   }
 
-  ReturnType call(InterfaceType* t1, InterfaceType* t2, Args... args) const {
+  ReturnType call(InterfaceType *t1, InterfaceType *t2, Args... args) const {
     const auto t1_type = std::type_index(typeid(*t1));
     const auto t2_type = std::type_index(typeid(*t2));
     if (internal_table.count(t1_type) > 0) {
       if (internal_table.at(t1_type).count(t2_type) > 0) {
-        const auto& pair = internal_table.at(t1_type).at(t2_type);
+        const auto &pair = internal_table.at(t1_type).at(t2_type);
         return pair.first(t1, t2, pair.second, std::forward(args)...);
       }
     }
