@@ -7,6 +7,7 @@
 #include "mcmini/model/objects/condition_variables.hpp"
 #include "mcmini/model/objects/mutex.hpp"
 #include "mcmini/model/objects/semaphore.hpp"
+#include "mcmini/model/objects/barrier.hpp"
 #include "mcmini/model/objects/thread.hpp"
 #include "mcmini/model/transitions/memory/memory_access.hpp"
 #include "mcmini/model/transitions/thread/thread_exit.hpp"
@@ -94,6 +95,11 @@ visible_object_state* translate_recorded_object_to_model(
       return new objects::semaphore(static_cast<objects::semaphore::state>(
                                         recorded_object.sem_state.status),
                                     recorded_object.sem_state.count);
+    }
+    case BARRIER: {
+      auto barrier_state = static_cast<objects::barrier::state>(
+          recorded_object.bar_state.status);
+      return new objects::barrier(barrier_state, recorded_object.bar_state.count);
     }
     // Other objects here
     // case ...  { }

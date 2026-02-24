@@ -64,6 +64,17 @@ int libpthread_cond_signal(pthread_cond_t*);
 int libpthread_cond_broadcast(pthread_cond_t*);
 int libpthread_cond_destroy(pthread_cond_t*);
 
+int pthread_barrier_init(pthread_barrier_t *barrier,
+                         const pthread_barrierattr_t *attr,
+                         unsigned count);
+int pthread_barrier_wait(pthread_barrier_t *barrier);
+int pthread_barrier_destroy(pthread_barrier_t *barrier);
+int libpthread_barrier_init(pthread_barrier_t *barrier,
+                            const pthread_barrierattr_t *attr,
+                             unsigned count);
+int libpthread_barrier_wait(pthread_barrier_t *barrier);
+int libpthread_barrier_destroy(pthread_barrier_t *barrier);
+
 int sem_init(sem_t*, int, unsigned);
 int sem_post(sem_t*);
 int sem_wait(sem_t*);

@@ -74,6 +74,7 @@ rec_list *add_rec_entry(const visible_object *vo, rec_list **head, rec_list **cu
   }
   new_node->vo = *vo;
   libpthread_mutex_init(&new_node->node_lock, NULL);
+  libpthread_cond_init(&new_node->node_cond, NULL);
   if (*head == NULL) {
     *head = new_node;
     *current = new_node;
@@ -115,7 +116,8 @@ rec_list *add_rec_entry_record_mode(const visible_object *vo) {
   new_node->next = NULL;
 
   libpthread_mutex_init(&new_node->node_lock, NULL);
-  
+  libpthread_cond_init(&new_node->node_cond, NULL);
+
   // Must clear the hash handle before adding
   memset(&new_node->hh, 0, sizeof(new_node->hh));
 

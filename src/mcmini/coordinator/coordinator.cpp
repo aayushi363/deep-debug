@@ -189,3 +189,12 @@ model::state::runner_id_t model_to_system_map::observe_runner(
   _coordinator.system_address_mapping.insert({rp_vobj_handle, new_objid});
   return new_runner_id;
 }
+
+const model::visible_object_state *
+model_to_system_map::get_current_object_state(
+    model::state::objid_t id) const {
+  // Cast to state& to call the non-template virtual get_state_of_object()
+  // (mutable_state shadows it with a template overload).
+  const model::state& s = _coordinator.current_program_model.get_current_state();
+  return s.get_state_of_object(id);
+}

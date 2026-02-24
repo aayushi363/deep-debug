@@ -44,6 +44,9 @@ typeof(&pthread_cond_timedwait) pthread_cond_timedwait_ptr;
 typeof(&pthread_cond_signal) pthread_cond_signal_ptr;
 typeof(&pthread_cond_broadcast) pthread_cond_broadcast_ptr;
 typeof(&pthread_cond_destroy) pthread_cond_destroy_ptr;
+typeof(&pthread_barrier_init) pthread_barrier_init_ptr;
+typeof(&pthread_barrier_wait) pthread_barrier_wait_ptr;
+typeof(&pthread_barrier_destroy) pthread_barrier_destroy_ptr;
 typeof(&sleep) sleep_ptr;
 __attribute__((__noreturn__)) typeof(&exit) exit_ptr;
 __attribute__((__noreturn__)) typeof(&abort) abort_ptr;
@@ -142,6 +145,9 @@ void mc_load_intercepted_pthread_functions(void) {
   pthread_cond_signal_ptr = dlsym(libpthread_handle, "pthread_cond_signal");
   pthread_cond_broadcast_ptr = dlsym(libpthread_handle, "pthread_cond_broadcast");
   pthread_cond_destroy_ptr = dlsym(libpthread_handle, "pthread_cond_destroy");
+  pthread_barrier_init_ptr = dlsym(libpthread_handle, "pthread_barrier_init");
+  pthread_barrier_wait_ptr = dlsym(libpthread_handle, "pthread_barrier_wait");
+  pthread_barrier_destroy_ptr = dlsym(libpthread_handle, "pthread_barrier_destroy");
   sleep_ptr = dlsym(libc_handle, "sleep");
   exit_ptr = dlsym(libc_handle, "exit");
   abort_ptr = dlsym(libc_handle, "abort");
@@ -400,16 +406,7 @@ static main_fn real_main;
 
 static int wrapped_main(int argc, char **argv, char **envp) {
   int rc = real_main(argc, argv, envp);
-  // libmcmini_init() itself is safe to call any time after main() has run
-  // (pthreads are certainly initialized by now), unlike at the top of
-  // __libc_start_main() below, which runs before glibc's own internal
-  // pthread-subsystem setup and must stay free of any pthread_once/mutex
-  // use until the real __libc_start_main() has had a chance to run.
   libmcmini_init();
-  // Route a plain return from main() through the exact same model-checking
-  // exit protocol as an explicit exit(rc) call: mc_transparent_exit()
-  // itself performs the real, final process termination in every mode
-  // (see wrappers.c), so this call never returns.
   mc_transparent_exit(rc);
 }
 
@@ -421,4 +418,35 @@ int __libc_start_main(main_fn main, int argc, char **argv, void (*init)(void),
       (libc_start_main_fn)dlsym(RTLD_NEXT, "__libc_start_main");
   return real_start_main(wrapped_main, argc, argv, init, fini, rtld_fini,
                          stack_end);
+}
+
+int pthread_barrier_init(pthread_barrier_t *barrier,
+                         const pthread_barrierattr_t *attr,
+                         unsigned count) {
+  return mc_pthread_barrier_init(barrier, attr, count);
+}
+
+int libpthread_barrier_init(pthread_barrier_t *barrier,
+                            const pthread_barrierattr_t *attr,
+                            unsigned count) {
+  libmcmini_init();
+  return (*pthread_barrier_init_ptr)(barrier, attr, count);
+}
+
+int pthread_barrier_wait(pthread_barrier_t *barrier) {
+  return mc_pthread_barrier_wait(barrier);
+}
+
+int libpthread_barrier_wait(pthread_barrier_t *barrier) {
+  libmcmini_init();
+  return (*pthread_barrier_wait_ptr)(barrier);
+}
+
+int pthread_barrier_destroy(pthread_barrier_t *barrier) {
+  return mc_pthread_barrier_destroy(barrier);
+}
+
+int libpthread_barrier_destroy(pthread_barrier_t *barrier) {
+  libmcmini_init();
+  return (*pthread_barrier_destroy_ptr)(barrier);
 }

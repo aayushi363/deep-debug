@@ -28,6 +28,11 @@
 #include "mcmini/model/transitions/mutex/callbacks.hpp"
 #include "mcmini/model/transitions/mutex/mutex_init.hpp"
 #include "mcmini/model/transitions/semaphore/callbacks.hpp"
+#include "mcmini/model/transitions/barrier/callbacks.hpp"
+#include "mcmini/model/transitions/barrier/barrier_init.hpp"
+#include "mcmini/model/transitions/barrier/barrier_arrive.hpp"
+#include "mcmini/model/transitions/barrier/barrier_wait.hpp"
+#include "mcmini/model/transitions/barrier/barrier_destroy.hpp"
 #include "mcmini/model/transitions/thread/callbacks.hpp"
 #include "mcmini/model_checking/algorithms/classic_dpor/clock_vector.hpp"
 #include "mcmini/model_checking/algorithms/classic_dpor/runner_item.hpp"
@@ -589,6 +594,36 @@ classic_dpor::dependency_relation_type classic_dpor::default_dependencies() {
       &condition_variable_signal::depends);
   dr.register_dd_entry<const memory_access, const memory_access>(
       &memory_access::depends);
+  // Barrier dependencies
+  dr.register_dd_entry<const barrier_init, const barrier_init>(
+      &barrier_init::depends);
+  dr.register_dd_entry<const barrier_init, const barrier_arrive>(
+      &barrier_init::depends);
+  dr.register_dd_entry<const barrier_init, const barrier_pass>(
+      &barrier_init::depends);
+  dr.register_dd_entry<const barrier_init, const barrier_destroy>(
+      &barrier_init::depends);
+  dr.register_dd_entry<const barrier_arrive, const barrier_arrive>(
+      &barrier_arrive::depends);
+  dr.register_dd_entry<const barrier_arrive, const barrier_pass>(
+      &barrier_arrive::depends);
+  dr.register_dd_entry<const barrier_arrive, const barrier_destroy>(
+      &barrier_arrive::depends);
+  dr.register_dd_entry<const barrier_pass, const barrier_pass>(
+      &barrier_pass::depends);
+  dr.register_dd_entry<const barrier_pass, const barrier_destroy>(
+      &barrier_pass::depends);
+  dr.register_dd_entry<const barrier_destroy, const barrier_destroy>(
+      &barrier_destroy::depends);
+  // Barrier/mutex cross-type: different objects, always independent
+  dr.register_dd_entry<const barrier_arrive, const mutex_lock>(
+      &barrier_arrive::depends);
+  dr.register_dd_entry<const barrier_arrive, const mutex_unlock>(
+      &barrier_arrive::depends);
+  dr.register_dd_entry<const barrier_pass, const mutex_lock>(
+      &barrier_pass::depends);
+  dr.register_dd_entry<const barrier_pass, const mutex_unlock>(
+      &barrier_pass::depends);
   return dr;
 }
 
@@ -617,6 +652,13 @@ classic_dpor::coenabled_relation_type classic_dpor::default_coenabledness() {
       &condition_variable_destroy::coenabled_with);
   cr.register_dd_entry<const memory_access, const memory_access>(
       &memory_access::coenabled_with);
+  // Barrier co-enablement
+  cr.register_dd_entry<const barrier_arrive, const barrier_arrive>(
+      &barrier_arrive::coenabled_with);
+  cr.register_dd_entry<const barrier_arrive, const barrier_pass>(
+      &barrier_arrive::coenabled_with);
+  cr.register_dd_entry<const barrier_pass, const barrier_pass>(
+      &barrier_pass::coenabled_with);
   return cr;
 }
 

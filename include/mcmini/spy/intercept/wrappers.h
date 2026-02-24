@@ -56,6 +56,11 @@ int mc_pthread_cond_broadcast(pthread_cond_t *cond);
 int mc_pthread_cond_destroy(pthread_cond_t *cond);
 void __mcmini_read(void *addr, size_t size, uintptr_t site_id);
 void __mcmini_write(void *addr, size_t size, uintptr_t site_id);
+int mc_pthread_barrier_init(pthread_barrier_t *barrier,
+                            const pthread_barrierattr_t *attr,
+                            unsigned count);
+int mc_pthread_barrier_wait(pthread_barrier_t *barrier);
+int mc_pthread_barrier_destroy(pthread_barrier_t *barrier);
 
 
 /*
@@ -106,6 +111,10 @@ static inline rec_list* get_or_create_object_record(void *obj_addr,
             } else if (obj_type == SEMAPHORE) {
                 vo.sem_state.status = uninit_state;
                 vo.sem_state.count = 0; // Or some initial value
+            } else if (obj_type == BARRIER) {
+                vo.bar_state.status = uninit_state;
+                vo.bar_state.count = 0;
+                vo.bar_state.arrived = 0;
             } else if (obj_type == CONDITION_VARIABLE) {
                 vo.cond_state.status = uninit_state;
                 vo.cond_state.interacting_thread = 0;

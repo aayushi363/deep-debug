@@ -6,6 +6,7 @@
 #include "mcmini/model/transitions/process/callbacks.hpp"
 #include "mcmini/model/transitions/semaphore/callbacks.hpp"
 #include "mcmini/model/transitions/thread/callbacks.hpp"
+#include "mcmini/model/transitions/barrier/callbacks.hpp"
 #include "mcmini/spy/checkpointing/transitions.h"
 
 using namespace model;
@@ -33,5 +34,9 @@ transition_registry transition_registry::default_registry() {
   tr.register_transition(SEM_WAIT_TYPE, &sem_wait_callback);
   tr.register_transition(MEMORY_READ_TYPE, &memory_read_callback);
   tr.register_transition(MEMORY_WRITE_TYPE, &memory_write_callback);
+  tr.register_transition(BARRIER_INIT_TYPE, &barrier_init_callback);
+  tr.register_transition(BARRIER_ARRIVE_TYPE, &barrier_arrive_callback);
+  tr.register_transition(BARRIER_PASS_TYPE, &barrier_pass_callback);
+  tr.register_transition(BARRIER_DESTROY_TYPE, &barrier_destroy_callback);
   return tr;
 }

@@ -78,6 +78,16 @@ class model_to_system_map final {
   model::state::objid_t observe_object(real_world::remote_address<void>,
                                        const model::visible_object_state *);
 
+  /**
+   * @brief Read the current state of a model object by its id.
+   *
+   * Callbacks that need to capture immutable metadata (e.g. a barrier's
+   * generation counter) at the time a transition is created should use this
+   * method.
+   */
+  const model::visible_object_state *get_current_object_state(
+      model::state::objid_t id) const;
+
   // TODO: Does it make sense to be able to add a runner without a transition
   // and then later (retroactively) give it a transition (in _this_ interface
   // that is)

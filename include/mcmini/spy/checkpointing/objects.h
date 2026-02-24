@@ -15,6 +15,7 @@ typedef enum visible_object_type {
   MUTEX,
   SEMAPHORE,
   CONDITION_VARIABLE,
+  BARRIER,
   THREAD,
   CV_WAITERS_QUEUE
 } visible_object_type;
@@ -46,10 +47,23 @@ typedef enum semaphore_status {
   SEM_DESTROYED,
 } semaphore_status;
 
+typedef enum barrier_status {
+  BARRIER_UNINITIALIZED,
+  BARRIER_INITIALIZED,
+  BARRIER_DESTROYED,
+} barrier_status;
+
 typedef struct semaphore_state {
   unsigned count;
   semaphore_status status;
 } semaphore_state;
+
+typedef struct barrier_state {
+  unsigned count;          // Number of threads required to pass barrier
+  unsigned arrived;        // Number of threads that have arrived in current generation
+  unsigned generation;     // Generation counter: incremented each time the barrier fires
+  barrier_status status;
+} barrier_state;
 
 typedef struct cv_waiters_queue_state{
   void *cv_location;
@@ -79,6 +93,7 @@ typedef struct visible_object {
   union{
   mutex_state mut_state;
   semaphore_state sem_state;
+  barrier_state bar_state;
   condition_variable_state cond_state;
   thread_state thrd_state;
   cv_waiters_queue_state waiting_queue_state;
