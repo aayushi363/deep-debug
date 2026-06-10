@@ -40,6 +40,14 @@ struct config {
   bool stop_at_first_deadlock = false;
 
   /**
+   * Whether to report data races (conflicting, concurrent memory accesses)
+   * discovered during model checking. Requires the target to be built with the
+   * McMini LLVM memory-instrumentation pass; otherwise no memory-access
+   * transitions exist and nothing is reported.
+   */
+  bool detect_races = false;
+
+  /**
    * Informs McMini that the target executable should be run under DMTCP with
    * `libmcmini.so` configured in record mode.
    */
