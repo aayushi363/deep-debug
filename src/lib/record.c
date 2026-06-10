@@ -4,6 +4,7 @@
 #include "mcmini/spy/checkpointing/transitions.h"
 #include "mcmini/spy/intercept/interception.h"
 #include "mcmini/spy/checkpointing/uthash.h"
+#include "mcmini/spy/checkpointing/lockset.h"
 #include "mcmini/wrapper_timing.h"
 
 #include <stdio.h>
@@ -20,6 +21,8 @@ sem_t dmtcp_restart_sem;
 pthread_rwlock_t rec_list_lock = PTHREAD_RWLOCK_INITIALIZER;
 pthread_mutex_t pending_op_lock = PTHREAD_MUTEX_INITIALIZER;
 volatile atomic_int libmcmini_mode = PRE_DMTCP_INIT;
+volatile atomic_bool mcmini_mc_active = false;
+volatile atomic_bool mcmini_lockset_active = false;
 visible_object empty_visible_obj = {.type = UNKNOWN, .location = NULL};
 rec_list *head_record_mode = NULL;
 rec_list *current_record_mode = NULL;
@@ -219,5 +222,24 @@ enum libmcmini_mode get_current_mode() {
   return atomic_load(&libmcmini_mode);
 }
 void set_current_mode(enum libmcmini_mode new_mode) {
+  // Store the mode first, then derive the memory-hook fast-path gate, so that a
+  // thread observing `mcmini_mc_active == true` always reads a correct, active
+  // mode in the hook's full switch. The gate is `true` only in the phases where
+  // instrumented memory accesses are live model-checking transitions.
   atomic_store(&libmcmini_mode, new_mode);
+  const bool active =
+      new_mode == DMTCP_RESTART_INTO_BRANCH ||
+      new_mode == DMTCP_RESTART_INTO_TEMPLATE || new_mode == TARGET_BRANCH ||
+      new_mode == TARGET_BRANCH_AFTER_RESTART;
+  atomic_store(&mcmini_mc_active, active);
+
+  // Enable the Phase-1 lockset predictor while the target runs natively during
+  // recording (and right up to the checkpoint). Only when `MCMINI_LOCKSET` is
+  // set; otherwise this stays false and the memory hooks behave exactly as
+  // before. Must be mutually exclusive with `mcmini_mc_active` so the hook
+  // takes the cheap predictor path, not the scheduler path.
+  const bool lockset_active =
+      !active && lockset_is_enabled() &&
+      (new_mode == RECORD || new_mode == PRE_CHECKPOINT);
+  atomic_store(&mcmini_lockset_active, lockset_active);
 }

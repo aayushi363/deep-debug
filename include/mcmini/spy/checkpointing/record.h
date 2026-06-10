@@ -153,9 +153,41 @@ enum libmcmini_mode {
  */
 extern volatile atomic_int libmcmini_mode;
 
+/**
+ * @brief Fast-path gate for the LLVM memory-access hooks.
+ *
+ * The compiler instruments *every* load/store in the target with a call into
+ * `__mcmini_read`/`__mcmini_write`. During the RECORD/checkpoint phase the
+ * target must run at near-native speed, so the hooks have to be effectively
+ * free. This flag lets the hooks short-circuit with a single relaxed atomic
+ * load before touching thread-local state or computing the full mode.
+ *
+ * It is `true` exactly in the phases where memory accesses are schedulable
+ * model-checking transitions (the TARGET_BRANCH* and DMTCP_RESTART_INTO_*
+ * modes) and `false` everywhere else. `set_current_mode()` keeps it in sync.
+ */
+extern volatile atomic_bool mcmini_mc_active;
+
+/**
+ * @brief Phase-1 gate for the lockset race predictor.
+ *
+ * True exactly while the target runs natively during recording (RECORD /
+ * PRE_CHECKPOINT) *and* the predictor is enabled via `MCMINI_LOCKSET`. Mutually
+ * exclusive with `mcmini_mc_active`: when this is set the memory hooks take the
+ * cheap in-process lockset path instead of the model-checking scheduler path.
+ */
+extern volatile atomic_bool mcmini_lockset_active;
+
 bool is_in_restart_mode(void);
 enum libmcmini_mode get_current_mode();
 void set_current_mode(enum libmcmini_mode);
+
+/// @brief Resets the calling thread's memory-hook re-entrancy depth to 0.
+///
+/// Defensive measure for the checkpoint boundary (see `memory-hooks.c`): a
+/// checkpoint taken while a thread is mid-hook must not leave that thread's
+/// hooks permanently suppressed after restart.
+void mcmini_reset_memory_hook_depth(void);
 
 extern pthread_t ckpt_pthread_descriptor;
 extern volatile atomic_bool libmcmini_has_recorded_checkpoint_thread;
