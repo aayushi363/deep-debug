@@ -16,6 +16,7 @@
 #include "mcmini/common/exit.h"
 #include "mcmini/Thread_queue.h"
 #include "mcmini/mcmini.h"
+#include "mcmini/spy/checkpointing/lockset.h"
 #include "deadlock_detector.h"
 
 // TSan's public annotation API (see <sanitizer/tsan_interface.h>): same
@@ -383,6 +384,8 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
           mutex_record->vo.mut_state.owner = tid_self;
           libpthread_mutex_unlock(&rec_list_lock);
           if (__tsan_acquire) __tsan_acquire(mutex);
+          /* Phase-1 lockset predictor: this thread now holds `mutex`. */
+          lockset_acquire(mutex);
           /* Notify deadlock detector that visible progress occurred. */
           deadlock_detector_increment_progress();
           return rc;
@@ -471,6 +474,8 @@ int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
         mutex_record->vo.mut_state.status = UNLOCKED;
         mutex_record->vo.mut_state.owner = RID_INVALID;
         libpthread_mutex_unlock(&rec_list_lock);
+        /* Phase-1 lockset predictor: this thread no longer holds `mutex`. */
+        lockset_release(mutex);
         /* Notify deadlock detector that visible progress occurred. */
         deadlock_detector_increment_progress();
       }
