@@ -8,6 +8,7 @@
 #include "mcmini/model/objects/mutex.hpp"
 #include "mcmini/model/objects/semaphore.hpp"
 #include "mcmini/model/objects/thread.hpp"
+#include "mcmini/model/transitions/memory/memory_access.hpp"
 #include "mcmini/model/transitions/thread/thread_exit.hpp"
 #include "mcmini/model_checking/algorithm.hpp"
 #include "mcmini/model_checking/algorithms/classic_dpor.hpp"
@@ -31,8 +32,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -235,6 +238,58 @@ void found_deadlock(const coordinator& c, const stats& stats) {
   std::cout.flush();
 }
 
+// Canonical (min,max) site-id pairs predicted by the Phase-1 lockset predictor,
+// loaded from the handoff file it wrote. Used only to annotate which races
+// DPOR soundly confirms were already flagged (cheaply) during recording.
+static std::set<std::pair<uintptr_t, uintptr_t>> g_predicted_races;
+
+void load_predicted_races() {
+  const char* env = getenv("MCMINI_LOCKSET_OUT");
+  const std::string path = (env && env[0]) ? env : "mcmini-lockset-races.txt";
+  std::ifstream in(path);
+  if (!in) return;
+  std::string line;
+  while (std::getline(in, line)) {
+    std::istringstream ls(line);
+    std::string tag, addr;
+    unsigned long sa = 0, sb = 0;
+    char ka = 0, kb = 0;
+    if ((ls >> tag >> addr >> sa >> ka >> sb >> kb) && tag == "RACE") {
+      g_predicted_races.insert({std::min<uintptr_t>(sa, sb),
+                                std::max<uintptr_t>(sa, sb)});
+    }
+  }
+  if (!g_predicted_races.empty())
+    std::cerr << "[lockset] loaded " << g_predicted_races.size()
+              << " predicted race(s) from " << path << std::endl;
+}
+
+void found_data_race(const coordinator& c, const stats& stats,
+                     const model::transition& a, const model::transition& b) {
+  std::cerr << "DATA RACE (trace " << stats.trace_id << "):\n"
+            << "  thread " << a.get_executor() << ": " << a.to_string() << "\n"
+            << "  thread " << b.get_executor() << ": " << b.to_string()
+            << std::endl;
+  // If Phase 1's lockset predicted this exact site pair, mark it confirmed:
+  // cheap unsound prediction -> sound DPOR confirmation.
+  const auto* ma = dynamic_cast<const transitions::memory_access*>(&a);
+  const auto* mb = dynamic_cast<const transitions::memory_access*>(&b);
+  if (ma && mb && !g_predicted_races.empty()) {
+    const uintptr_t lo = std::min(ma->get_site_id(), mb->get_site_id());
+    const uintptr_t hi = std::max(ma->get_site_id(), mb->get_site_id());
+    if (g_predicted_races.count({lo, hi}))
+      std::cerr << "  [confirmed: predicted by Phase-1 lockset]" << std::endl;
+  }
+  std::stringstream ss;
+  const auto& program_model = c.get_current_program_model();
+  ss << "TRACE " << stats.trace_id << "\n";
+  for (const auto& t : program_model.get_trace()) {
+    ss << "thread " << t->get_executor() << ": " << t->to_string() << "\n";
+  }
+  std::cout << ss.str();
+  std::cout.flush();
+}
+
 void do_model_checking(const config& config) {
   algorithm::callbacks c;
   target target_program(config.target_executable,
@@ -262,6 +317,10 @@ void do_model_checking(const config& config) {
   c.undefined_behavior = &found_undefined_behavior;
   c.abnormal_termination = &found_abnormal_termination;
   c.nonzero_exit_code = &found_nonzero_exit_code;
+  if (config.detect_races) {
+    load_predicted_races();
+    c.data_race = &found_data_race;
+  }
   classic_dpor_checker.verify_using(coordinator, c);
   std::cout << "Model checking completed!" << std::endl;
 }
@@ -387,6 +446,10 @@ void do_model_checking_from_dmtcp_ckpt_file(const config& config) {
   c.deadlock = &found_deadlock;
   c.abnormal_termination = &found_abnormal_termination;
   c.nonzero_exit_code = &found_nonzero_exit_code;
+  if (config.detect_races) {
+    load_predicted_races();
+    c.data_race = &found_data_race;
+  }
   classic_dpor_checker.verify_using(coordinator, c);
   std::cerr << "Deep debugging completed!" << std::endl;
 }
@@ -527,6 +590,9 @@ int main_cpp(int argc, const char** argv) {
                strcmp(cur_arg[0], "-f") == 0) {
       mcmini_config.stop_at_first_deadlock = true;
       cur_arg++;
+    } else if (strcmp(cur_arg[0], "--detect-races") == 0) {
+      mcmini_config.detect_races = true;
+      cur_arg++;
     } else if (strcmp(cur_arg[0], "--print-at-traceId") == 0 ||
                strcmp(cur_arg[0], "-p") == 0) {
       mcmini_config.target_trace_id = strtoul(cur_arg[1], nullptr, 10);
@@ -549,6 +615,7 @@ int main_cpp(int argc, const char** argv) {
           "              [--max-depth-per-thread|-m <num>]\n"
           "              [--max-depth-per-trace|-M <num>]\n"
           "              [--first-deadlock|--first|-f]\n"
+          "              [--detect-races]\n"
           "              [--round-robin|-rr]\n"
           "              [--log-level|-log <level>]\n"
           "              [--help|-h]\n"
