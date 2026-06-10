@@ -298,6 +298,13 @@ void thread_handle_after_dmtcp_restart(void) {
     }
   }
 
+  // Defensive reset of this thread's memory-hook re-entrancy depth across the
+  // checkpoint boundary (Caveat 3). With the `mcmini_mc_active` fast-gate the
+  // depth is already 0 here (hooks no-op during RECORD before incrementing),
+  // but a stale non-zero depth would otherwise permanently suppress this
+  // thread's hooks for the rest of model checking.
+  mcmini_reset_memory_hook_depth();
+
   // Finally, we can communicate directly with the model checker `mcmini`.
   thread_await_scheduler();
 }
