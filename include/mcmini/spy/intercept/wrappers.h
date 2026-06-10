@@ -1,6 +1,8 @@
 #pragma once
 
 #include <pthread.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "mcmini/lib/entry.h"
 #include "mcmini/real_world/mailbox/runner_mailbox.h"
@@ -33,6 +35,8 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
 int mc_pthread_cond_signal(pthread_cond_t *cond);
 int mc_pthread_cond_broadcast(pthread_cond_t *cond);
 int mc_pthread_cond_destroy(pthread_cond_t *cond);
+void __mcmini_read(void *addr, size_t size, uintptr_t site_id);
+void __mcmini_write(void *addr, size_t size, uintptr_t site_id);
 
 
 /*

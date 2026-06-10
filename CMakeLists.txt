@@ -14,6 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 # Project configuration
 option(BUILD_TESTS OFF)
 option(VERBOSE_TESTING OFF)
+option(MCMINI_BUILD_LLVM_PASS "Build the McMini LLVM memory instrumentation pass" ON)
 set(MCMINI_DIR "${CMAKE_SOURCE_DIR}")
 set(MCMINI_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
 set(MCMINI_CMAKE_MODULE_DIR "${CMAKE_SOURCE_DIR}/cmake")
@@ -45,6 +46,7 @@ set(MCMINI_CPP_SRC
   src/mcmini/model/transition_registry.cpp
   src/mcmini/model/transition_sequence.cpp
   src/mcmini/model/transitions/condition_variables.cpp
+  src/mcmini/model/transitions/memory.cpp
   src/mcmini/model/transitions/mutex.cpp
   src/mcmini/model/transitions/process.cpp
   src/mcmini/model/transitions/thread.cpp
@@ -69,6 +71,8 @@ set(LIBMCMINI_C_SRC
   src/lib/entry.c
   src/lib/interception.c
   src/lib/log.c
+  src/lib/lockset.c
+  src/lib/memory-hooks.c
   src/lib/wrapper_timing.c
   src/lib/main.c
   src/lib/deadlock_detector.c
@@ -122,3 +126,41 @@ target_link_libraries(mcmini
 
 add_subdirectory(src/examples)
 add_subdirectory(test)
+
+if(MCMINI_BUILD_LLVM_PASS)
+  find_package(LLVM CONFIG QUIET)
+  if(LLVM_FOUND)
+    message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+    add_library(McMiniMemoryPass MODULE src/llvm/mcmini-memory-pass.cpp)
+    target_include_directories(McMiniMemoryPass SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(McMiniMemoryPass PRIVATE ${LLVM_DEFINITIONS})
+    target_compile_features(McMiniMemoryPass PRIVATE cxx_std_14)
+    set_target_properties(McMiniMemoryPass PROPERTIES
+      COMPILE_FLAGS "-fno-rtti"
+      PREFIX "")
+    find_program(MCMINI_CLANG clang)
+    if(MCMINI_CLANG)
+      add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/src/examples/data-race-llvm
+        COMMAND ${MCMINI_CLANG}
+          -g -O0
+          -fpass-plugin=$<TARGET_FILE:McMiniMemoryPass>
+          ${CMAKE_SOURCE_DIR}/src/examples/data-race-plain.c
+          -L$<TARGET_FILE_DIR:libmcmini>
+          -Wl,-rpath,$<TARGET_FILE_DIR:libmcmini>
+          -lmcmini
+          -pthread
+          -o ${CMAKE_BINARY_DIR}/src/examples/data-race-llvm
+        DEPENDS
+          McMiniMemoryPass
+          libmcmini
+          ${CMAKE_SOURCE_DIR}/src/examples/data-race-plain.c)
+      add_custom_target(data-race-llvm ALL
+        DEPENDS ${CMAKE_BINARY_DIR}/src/examples/data-race-llvm)
+    else()
+      message(WARNING "clang was not found; data-race-llvm example will not be built")
+    endif()
+  else()
+    message(WARNING "LLVM was not found; McMiniMemoryPass will not be built")
+  endif()
+endif()
