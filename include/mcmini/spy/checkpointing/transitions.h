@@ -28,7 +28,9 @@ typedef enum transition_type {
   SEM_INIT_TYPE,
   SEM_WAIT_TYPE,
   SEM_POST_TYPE,
-  SEM_DESTROY_TYPE
+  SEM_DESTROY_TYPE,
+  MEMORY_READ_TYPE,
+  MEMORY_WRITE_TYPE
 } transition_type;
 
 typedef struct mutex_init {

@@ -5,6 +5,7 @@
 #include "mcmini/coordinator/coordinator.hpp"
 #include "mcmini/model/exception.hpp"
 #include "mcmini/model/program.hpp"
+#include "mcmini/model/transition.hpp"
 #include "mcmini/model_checking/stats.hpp"
 #include "mcmini/real_world/process.hpp"
 
@@ -21,7 +22,12 @@ class algorithm {
     callbacks() = default;
     std::function<void(const coordinator &, const stats &)> crash;
     std::function<void(const coordinator &, const stats &)> deadlock;
-    std::function<void(const coordinator &, const stats &)> data_race;
+    /// Invoked when two conflicting, concurrent (happens-before-unordered)
+    /// memory accesses are discovered. The two `model::transition`s are the
+    /// racing accesses.
+    std::function<void(const coordinator &, const stats &,
+                       const model::transition &, const model::transition &)>
+        data_race;
     std::function<void(const coordinator &, const stats &)> unknown_error;
     std::function<void(const coordinator &, const stats &)> trace_completed;
     std::function<void(const coordinator &, const stats &,

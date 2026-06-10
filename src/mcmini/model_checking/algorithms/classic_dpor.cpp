@@ -6,12 +6,14 @@
 #include <cassert>
 #include <csignal>
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <list>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "mcmini/coordinator/coordinator.hpp"
@@ -21,6 +23,8 @@
 #include "mcmini/model/program.hpp"
 #include "mcmini/model/transition.hpp"
 #include "mcmini/model/transitions/condition_variables/callbacks.hpp"
+#include "mcmini/model/transitions/memory/callbacks.hpp"
+#include "mcmini/model/transitions/memory/memory_access.hpp"
 #include "mcmini/model/transitions/mutex/callbacks.hpp"
 #include "mcmini/model/transitions/mutex/mutex_init.hpp"
 #include "mcmini/model/transitions/semaphore/callbacks.hpp"
@@ -39,6 +43,14 @@ logger dpor_logger("dpor");
 struct classic_dpor::dpor_context {
   ::coordinator &coordinator;
   std::vector<model_checking::stack_item> stack;
+
+  // Data-race reporting state, populated by `verify_using`. The pointers refer
+  // to objects owned by `verify_using` and outlive the context's use of them.
+  const algorithm::callbacks *callbacks_ptr = nullptr;
+  const stats *stats_ptr = nullptr;
+  // Canonical (min,max) site-id pairs already reported, so that each pair of
+  // racing source locations is surfaced at most once across the whole search.
+  std::set<std::pair<uintptr_t, uintptr_t>> *reported_races = nullptr;
 
   dpor_context(::coordinator &c) : coordinator(c) {}
 
@@ -131,6 +143,10 @@ void classic_dpor::verify_using(coordinator &coordinator,
 
   stats model_checking_stats;
   dpor_context context(coordinator);
+  std::set<std::pair<uintptr_t, uintptr_t>> reported_races;
+  context.callbacks_ptr = &callbacks;
+  context.stats_ptr = &model_checking_stats;
+  context.reported_races = &reported_races;
   auto &dpor_stack = context.stack;
   dpor_stack.emplace_back(
       clock_vector(),
@@ -494,6 +510,27 @@ bool classic_dpor::dynamically_update_backtrack_sets_at_index(
                                    this->are_coenabled(next_sp, S_i) &&
                                    !context.happens_before_thread(i, p);
 
+  // Data-race reporting. A reversible race between two *memory accesses* is a
+  // data race: `are_dependent` already implies the accesses overlap and at
+  // least one is a write (see `memory_access::depends`), `are_coenabled`
+  // implies different threads, and `!happens_before_thread` implies they are
+  // concurrent (no synchronization orders them). Reported at most once per
+  // pair of source sites.
+  if (has_reversible_race && context.callbacks_ptr &&
+      context.callbacks_ptr->data_race && context.reported_races) {
+    const auto *a = dynamic_cast<const transitions::memory_access *>(&S_i);
+    const auto *b = dynamic_cast<const transitions::memory_access *>(&next_sp);
+    if (a && b) {
+      const uintptr_t s1 = a->get_site_id();
+      const uintptr_t s2 = b->get_site_id();
+      const auto key = std::make_pair(std::min(s1, s2), std::max(s1, s2));
+      if (context.reported_races->insert(key).second) {
+        context.callbacks_ptr->data_race(context.coordinator,
+                                         *context.stats_ptr, S_i, next_sp);
+      }
+    }
+  }
+
   // If there exists i such that ...
   if (has_reversible_race) {
     std::set<runner_id_t> e;
@@ -550,6 +587,8 @@ classic_dpor::dependency_relation_type classic_dpor::default_dependencies() {
       &condition_variable_signal::depends);
   dr.register_dd_entry<const condition_variable_signal, const mutex_lock>(
       &condition_variable_signal::depends);
+  dr.register_dd_entry<const memory_access, const memory_access>(
+      &memory_access::depends);
   return dr;
 }
 
@@ -576,6 +615,8 @@ classic_dpor::coenabled_relation_type classic_dpor::default_coenabledness() {
   cr.register_dd_entry<const condition_variable_destroy,
                        const condition_variable_signal>(
       &condition_variable_destroy::coenabled_with);
+  cr.register_dd_entry<const memory_access, const memory_access>(
+      &memory_access::coenabled_with);
   return cr;
 }
 
