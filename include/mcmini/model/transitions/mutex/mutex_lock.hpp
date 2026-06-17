@@ -32,6 +32,9 @@ struct mutex_lock : public model::transition {
   std::string to_string() const override {
     return "pthread_mutex_lock(mutex:" + std::to_string(mutex_id) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"mutex_lock\",\"obj_id\":" + std::to_string(mutex_id) + "}";
+  }
 
   // MARK: Model checking functions
   bool depends(const mutex_init* mi) const {

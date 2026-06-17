@@ -91,5 +91,13 @@ struct config {
   // Default severity level for logging. Overridden if a blacklist/whitelist
   // file path is provided (TODO).
   logging::severity_level global_severity_level = logging::severity_level::info;
+
+  /**
+   * If non-empty, mcmini will append one JSONL record per schedule outcome
+   * (completed/deadlock/UB/abort) to this file. The records are designed to
+   * be consumed by Antithesis's McminiSeedStrategy. The existing text output
+   * to stdout/stderr is preserved alongside.
+   */
+  std::string emit_jsonl_path = "";
 };
 } // namespace model

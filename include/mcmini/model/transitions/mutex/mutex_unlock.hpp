@@ -32,6 +32,9 @@ struct mutex_unlock : public model::transition {
   std::string to_string() const override {
     return "pthread_mutex_unlock(mutex:" + std::to_string(mutex_id) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"mutex_unlock\",\"obj_id\":" + std::to_string(mutex_id) + "}";
+  }
 };
 }  // namespace transitions
 }  // namespace model

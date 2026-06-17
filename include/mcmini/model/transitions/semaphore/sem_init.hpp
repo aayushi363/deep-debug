@@ -26,6 +26,9 @@ struct sem_init : public model::transition {
   std::string to_string() const override {
     return "sem_init(semaphore:" + std::to_string(sem_id) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"sem_init\",\"obj_id\":" + std::to_string(sem_id) + "}";
+  }
 };
 }  // namespace transitions
 }  // namespace model

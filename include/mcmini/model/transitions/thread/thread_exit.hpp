@@ -24,6 +24,9 @@ public:
   bool depends(const model::transition *t) const { return false; }
 
   std::string to_string() const override { return "exits"; }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"thread_exit\"}";
+  }
 };
 
 } // namespace transitions

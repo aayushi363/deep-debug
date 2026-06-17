@@ -20,6 +20,9 @@ public:
   bool depends(const model::transition *t) const { return false; }
 
   std::string to_string() const override { return "starts"; }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"thread_start\"}";
+  }
 };
 
 } // namespace transitions

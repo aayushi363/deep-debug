@@ -19,6 +19,9 @@ struct process_abort : public model::transition {
   bool aborts_program_execution() const override { return true; }
 
   std::string to_string() const override { return "abort(2) (syscall)"; }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"process_abort\"}";
+  }
 };
 
 }  // namespace transitions
