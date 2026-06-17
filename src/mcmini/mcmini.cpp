@@ -29,8 +29,11 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -42,6 +45,68 @@ using namespace model;
 using namespace model_checking;
 using namespace objects;
 using namespace real_world;
+
+// --- JSONL seed emission ---------------------------------------------------
+// When --emit-jsonl <path> is supplied, mcmini appends one JSONL record per
+// schedule outcome to the given file. The schema is documented in
+// customer-antithesis/deepdebugger/INTEGRATION_DESIGN.md. Existing text
+// output to stdout/stderr is preserved.
+
+static std::ofstream g_jsonl_out;
+
+static std::string escape_json_string(const std::string& s) {
+  std::string out;
+  out.reserve(s.size() + 2);
+  for (char c : s) {
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
+// Writes the common per-schedule prefix to `os` — opens the SDK-capture
+// wrapper `{"mcmini_schedule":{...` then writes trace_id/outcome, the events
+// array (from program_model.get_trace()), the pending array, and the stats
+// object. Leaves BOTH objects OPEN so callers can add outcome-specific fields
+// before closing with "}}\n" (or "}}}\n" if they opened a nested object).
+static void emit_jsonl_schedule_base(std::ostream& os, uint32_t trace_id,
+                                     const char* outcome,
+                                     const coordinator& c,
+                                     const stats& stats_) {
+  const auto& program_model = c.get_current_program_model();
+  os << "{\"mcmini_schedule\":{"
+     << "\"trace_id\":" << trace_id
+     << ",\"outcome\":\"" << outcome << "\""
+     << ",\"events\":[";
+  bool first = true;
+  for (const auto& t : program_model.get_trace()) {
+    if (!first) os << ",";
+    os << t->to_json();
+    first = false;
+  }
+  os << "],\"pending\":[";
+  first = true;
+  for (const auto& tpair : program_model.get_pending_transitions()) {
+    if (!first) os << ",";
+    os << tpair.second->to_json();
+    first = false;
+  }
+  os << "],\"stats\":{\"total_transitions\":" << stats_.total_transitions << "}";
+}
+// --- end JSONL seed emission -----------------------------------------------
 
 visible_object_state* translate_recorded_object_to_model(
     const ::visible_object& recorded_object,
@@ -108,7 +173,12 @@ runner_state* translate_recorded_runner_to_model(
   }
 }
 
-void finished_trace_classic_dpor(const coordinator& c, const stats& stats) {
+// Shared text-printing helper. Used by finished_trace_classic_dpor() for
+// completed schedules and by found_undefined_behavior() which previously
+// chained to it. Extracted to avoid binding finished_trace_classic_dpor with
+// extra parameters (the algorithm's callback slot is a fixed-arity
+// std::function and default args are not part of function-pointer type).
+static void print_trace_text(const coordinator& c, const stats& stats) {
   std::stringstream ss;
   const auto& program_model = c.get_current_program_model();
   ss << "TRACE " << stats.trace_id << "\n";
@@ -123,10 +193,34 @@ void finished_trace_classic_dpor(const coordinator& c, const stats& stats) {
   std::cout.flush();
 }
 
+void finished_trace_classic_dpor(const coordinator& c, const stats& stats) {
+  print_trace_text(c, stats);
+
+  // mcmini's algorithm calls trace_completed for EVERY completed trace and
+  // ADDITIONALLY calls found_deadlock for the subset that are deadlocks. For
+  // JSONL we want one record per trace with the correct outcome, so skip the
+  // "clean" emit when the program is in deadlock — found_deadlock will emit
+  // its own record with outcome="deadlock".
+  if (g_jsonl_out.is_open() &&
+      !c.get_current_program_model().is_in_deadlock()) {
+    emit_jsonl_schedule_base(g_jsonl_out, stats.trace_id, "clean", c, stats);
+    g_jsonl_out << "}}\n";
+    g_jsonl_out.flush();
+  }
+}
+
 void found_undefined_behavior(const coordinator& c, const stats& stats,
                               const undefined_behavior_exception& ub) {
   std::cerr << "UNDEFINED BEHAVIOR:\n" << ub.what() << std::endl;
-  finished_trace_classic_dpor(c, stats);
+  print_trace_text(c, stats);
+
+  if (g_jsonl_out.is_open()) {
+    emit_jsonl_schedule_base(g_jsonl_out, stats.trace_id, "undefined_behavior",
+                             c, stats);
+    g_jsonl_out << ",\"ub_message\":\""
+                << escape_json_string(ub.what()) << "\"}}\n";
+    g_jsonl_out.flush();
+  }
 }
 
 void found_abnormal_termination(
@@ -161,6 +255,18 @@ void found_abnormal_termination(
      << "\n";
   std::cout << ss.str();
   std::cout.flush();
+
+  if (g_jsonl_out.is_open()) {
+    emit_jsonl_schedule_base(g_jsonl_out, stats.trace_id, "abnormal_termination",
+                             c, stats);
+    g_jsonl_out << ",\"termination\":{"
+                << "\"signal\":" << ub.signo
+                << ",\"signal_name\":\""
+                << escape_json_string(sig_to_str.at(ub.signo)) << "\""
+                << ",\"culprit_thread\":" << ub.culprit
+                << "}}}\n";
+    g_jsonl_out.flush();
+  }
 }
 
 void found_deadlock(const coordinator& c, const stats& stats) {
@@ -176,6 +282,12 @@ void found_deadlock(const coordinator& c, const stats& stats) {
   }
   std::cout << ss.str();
   std::cout.flush();
+
+  if (g_jsonl_out.is_open()) {
+    emit_jsonl_schedule_base(g_jsonl_out, stats.trace_id, "deadlock", c, stats);
+    g_jsonl_out << "}}\n";
+    g_jsonl_out.flush();
+  }
 }
 
 void do_model_checking(const config& config) {
@@ -444,6 +556,13 @@ int main_cpp(int argc, const char** argv) {
                strcmp(cur_arg[0], "-f") == 0) {
       mcmini_config.stop_at_first_deadlock = true;
       cur_arg++;
+    } else if (strcmp(cur_arg[0], "--emit-jsonl") == 0) {
+      if (cur_arg[1] == NULL) {
+        fprintf(stderr, "--emit-jsonl requires a path argument\n");
+        exit(1);
+      }
+      mcmini_config.emit_jsonl_path = cur_arg[1];
+      cur_arg += 2;
     } else if (strcmp(cur_arg[0], "--print-at-traceId") == 0 ||
                strcmp(cur_arg[0], "-p") == 0) {
       mcmini_config.target_trace_id = strtoul(cur_arg[1], nullptr, 10);
@@ -466,6 +585,7 @@ int main_cpp(int argc, const char** argv) {
           "              [--max-depth-per-thread|-m <num>]\n"
           "              [--first-deadlock|--first|-f]\n"
           "              [--log-level|-log <level>]\n"
+          "              [--emit-jsonl <path>]\n"
           "              [--help|-h]\n"
           "              target_executable\n");
       exit(1);
@@ -504,6 +624,19 @@ int main_cpp(int argc, const char** argv) {
   signal_tracker::install_process_wide_signal_handlers();
   logging::log_control::instance().allow_everything_over(
       mcmini_config.global_severity_level);
+
+  // Open the JSONL seed file if requested. Truncates any prior content.
+  if (!mcmini_config.emit_jsonl_path.empty()) {
+    g_jsonl_out.open(mcmini_config.emit_jsonl_path,
+                     std::ios::out | std::ios::trunc);
+    if (!g_jsonl_out.is_open()) {
+      fprintf(stderr,
+              "*** Could not open --emit-jsonl path '%s' for writing\n",
+              mcmini_config.emit_jsonl_path.c_str());
+      exit(1);
+    }
+  }
+
   if (mcmini_config.record_target_executable_only) {
     do_recording(mcmini_config);
   } else if (mcmini_config.checkpoint_file != "") {

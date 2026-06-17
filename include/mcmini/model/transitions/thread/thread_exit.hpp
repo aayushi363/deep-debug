@@ -23,6 +23,9 @@ struct thread_exit : public model::transition {
   }
 
   std::string to_string() const override { return "exits"; }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"thread_exit\"}";
+  }
 };
 
 }  // namespace transitions

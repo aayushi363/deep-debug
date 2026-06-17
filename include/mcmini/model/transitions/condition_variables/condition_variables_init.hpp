@@ -24,6 +24,9 @@ struct condition_variable_init : public model::transition{
   std::string to_string() const override {
     return "pthread_cond_init(condition_variable:" + std::to_string(condition_variable_id) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"cond_init\",\"obj_id\":" + std::to_string(condition_variable_id) + "}";
+  }
 };
 }  // namespace transitions
 }  // namespace model

@@ -19,6 +19,9 @@ struct thread_start : public model::transition {
   }
 
   std::string to_string() const override { return "starts"; }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"thread_start\"}";
+  }
 };
 
 }  // namespace transitions

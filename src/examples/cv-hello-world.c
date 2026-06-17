@@ -29,7 +29,7 @@ int quiet = 0;
 void *reader(void *arg) {
   int *reader_num = arg;
   int i;
-  for (i = 0; i < 3; i++) {
+  for (i = 0; i < 1; i++) {
     // Acquire permission    
     sleep(6);
     pthread_mutex_lock(&mut);
@@ -98,7 +98,7 @@ void *writer(void *arg) {
 }
 
 int main(int argc, char *argv[]) {
-  int num_readers = 2;
+  int num_readers = 1;
   int num_writers = 2;
   int i;
   int thread_number[3] = {1, 2, 3};

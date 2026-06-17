@@ -94,6 +94,9 @@ struct condition_variable_signal : public model::transition {
   std::string to_string() const override {
     return "pthread_cond_signal(cond:" + std::to_string(cond_id) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"cond_signal\",\"obj_id\":" + std::to_string(cond_id) + "}";
+  }
   // MARK: Model checking functions
   bool depends(const condition_variable_wait* cw) const {
     return this->cond_id == cw->get_id();

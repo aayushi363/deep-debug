@@ -23,6 +23,9 @@ struct sem_destroy : public model::transition {
   std::string to_string() const override {
     return "sem_init(semaphore:" + std::to_string(sem_id) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"sem_destroy\",\"obj_id\":" + std::to_string(sem_id) + "}";
+  }
 };
 }  // namespace transitions
 }  // namespace model

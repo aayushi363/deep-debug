@@ -164,6 +164,20 @@ class transition {
   std::string debug_string() const {
     return "thread " + std::to_string(this->executor) + ": " + to_string();
   }
+
+  /// @brief Structured JSON representation of this transition, used to emit
+  /// machine-readable schedule records (see `--emit-jsonl` in mcmini.cpp).
+  /// Each subclass should return a JSON object of the form
+  /// `{"thread":<executor>,"op":"<op_name>", ...op-specific fields...}`.
+  /// The helper `json_header()` produces the `"thread":<executor>` portion.
+  virtual std::string to_json() const = 0;
+
+  /// @brief Helper for to_json() overrides — returns the leading
+  /// `"thread":<executor>` field that every transition's JSON object begins with.
+  std::string json_header() const {
+    return "\"thread\":" + std::to_string(this->executor);
+  }
+
   virtual ~transition() = default;
 
  protected:

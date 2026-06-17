@@ -50,6 +50,9 @@ struct condition_variable_destroy : public model::transition {
   std::string to_string() const override {
     return "pthread_cond_destroy(condition_variable:" + std::to_string(cond_id) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"cond_destroy\",\"obj_id\":" + std::to_string(cond_id) + "}";
+  }
   // MARK: Model checking functions
   bool coenabled_with(const condition_variable_wait* cw) const {
     return this->cond_id != cw->get_id(); // Can't destroy CV if threads waiting
