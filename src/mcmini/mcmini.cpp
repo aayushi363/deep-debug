@@ -642,11 +642,9 @@ int main_cpp(int argc, const char** argv) {
                strcmp(cur_arg[0], "-f") == 0) {
       mcmini_config.stop_at_first_deadlock = true;
       cur_arg++;
-<<<<<<< HEAD
     } else if (strcmp(cur_arg[0], "--detect-races") == 0) {
       mcmini_config.detect_races = true;
       cur_arg++;
-=======
     } else if (strcmp(cur_arg[0], "--emit-jsonl") == 0) {
       if (cur_arg[1] == NULL) {
         fprintf(stderr, "--emit-jsonl requires a path argument\n");
@@ -654,7 +652,6 @@ int main_cpp(int argc, const char** argv) {
       }
       mcmini_config.emit_jsonl_path = cur_arg[1];
       cur_arg += 2;
->>>>>>> aa430e9 (WIP: Antithesis integration snapshot before rebase)
     } else if (strcmp(cur_arg[0], "--print-at-traceId") == 0 ||
                strcmp(cur_arg[0], "-p") == 0) {
       mcmini_config.target_trace_id = strtoul(cur_arg[1], nullptr, 10);
