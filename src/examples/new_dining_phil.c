@@ -1,5 +1,6 @@
 #include <pthread.h>
 #include <stdio.h>
+#include <unistd.h>  // for usleep
 #define N 3
 
 pthread_mutex_t forks[N];
