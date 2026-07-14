@@ -507,6 +507,12 @@ static void *template_thread(void *unused) {
         log_verbose("Writing semaphore entry %p (count %d, status: %d)\n",
                (void *)entry->vo.location,
                entry->vo.sem_state.count, entry->vo.sem_state.status);
+      } else if (entry->vo.type == BARRIER) {
+        log_verbose("Writing barrier entry %p (count %d, arrived %d, "
+               "generation %d, status: %d)\n",
+               (void *)entry->vo.location,
+               entry->vo.bar_state.count, entry->vo.bar_state.arrived,
+               entry->vo.bar_state.generation, entry->vo.bar_state.status);
       } else {
         libc_abort();
       }

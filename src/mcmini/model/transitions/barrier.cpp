@@ -120,12 +120,18 @@ bool barrier_arrive::depends(const barrier_arrive* ba) const {
 }
 
 bool barrier_arrive::depends(const barrier_pass* bp) const {
-  // Both arrive and pass store the arrive-cycle generation (barrier_pass_callback
-  // reads get_arrive_gen() from the barrier model).  Same-cycle pairs (same gen)
-  // are dependent; cross-cycle pairs are independent, pruning spurious DPOR
-  // backtracking points when the barrier is reused across multiple cycles.
-  return this->barrier_id == bp->get_id() &&
-         (this->_generation == bp->get_generation());
+  // Conservative: any arrive/pass on the SAME barrier are dependent.
+  //
+  // We deliberately do NOT refine this by generation. A transition's stored
+  // _generation is a snapshot taken in the discovery callback, but the cycle a
+  // thread actually arrives in is interleaving-dependent whenever more than
+  // `count` threads use a barrier (whoever is modeled as the (count+1)-th
+  // arrival lands in the next generation). No fixed snapshot can be correct
+  // for every interleaving DPOR reorders, so a generation-equality test could
+  // declare a same-thread arrive->pass pair "independent" and drop a required
+  // backtracking point (unsound reduction). Depending on barrier_id alone
+  // over-approximates dependencies, which is always sound for DPOR.
+  return this->barrier_id == bp->get_id();
 }
 
 bool barrier_arrive::depends(const barrier_destroy* bd) const {
@@ -138,20 +144,21 @@ bool barrier_arrive::coenabled_with(const barrier_arrive*) const {
 }
 
 bool barrier_arrive::coenabled_with(const barrier_pass* bp) const {
-  // arrive(gen=k) and pass(gen=k) are from the same firing cycle.
-  // By the time any pass for cycle k is enabled (all N arrivals have
-  // completed the barrier), no arrive for cycle k can still be pending.
-  // Therefore same-cycle arrive and pass are never co-enabled, eliminating
-  // DPOR backtracking points between them.
-  if (this->barrier_id != bp->get_id()) return true;
-  return this->_generation != bp->get_generation();
+  // Conservative: assume arrive and pass can be co-enabled. When more than
+  // `count` threads use a barrier, a pass (barrier already satisfied) and a
+  // straggler's arrive (always enabled) genuinely are enabled in the same
+  // state, so we cannot rule co-enablement out. Reporting "not co-enabled"
+  // when they actually are could cause DPOR to skip a needed backtracking
+  // point; reporting co-enabled is the safe over-approximation. As with
+  // depends(), we do not refine by generation (see barrier_arrive::depends).
+  return true;
 }
 
 // barrier_pass dependency and co-enablement methods
 bool barrier_pass::depends(const barrier_arrive* ba) const {
-  // Symmetric to arrive::depends(pass*): same generation = same cycle.
-  return this->barrier_id == ba->get_id() &&
-         (ba->get_generation() == this->_generation);
+  // Symmetric to barrier_arrive::depends(barrier_pass*): conservative, by
+  // barrier_id only (no generation refinement — see the note there).
+  return this->barrier_id == ba->get_id();
 }
 
 bool barrier_pass::depends(const barrier_pass* bp) const {
@@ -170,9 +177,8 @@ bool barrier_pass::coenabled_with(const barrier_pass* bp) const {
 }
 
 bool barrier_pass::coenabled_with(const barrier_arrive* ba) const {
-  // Symmetric to arrive::coenabled_with(pass*).
-  if (this->barrier_id != ba->get_id()) return true;
-  return ba->get_generation() != this->_generation;
+  // Symmetric to barrier_arrive::coenabled_with(barrier_pass*): conservative.
+  return true;
 }
 
 // barrier_destroy dependency methods
