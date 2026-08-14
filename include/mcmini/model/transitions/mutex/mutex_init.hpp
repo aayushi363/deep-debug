@@ -24,6 +24,9 @@ struct mutex_init : public model::transition {
   std::string to_string() const override {
     return "pthread_mutex_init(mutex:" + std::to_string(mutex_id) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"mutex_init\",\"obj_id\":" + std::to_string(mutex_id) + "}";
+  }
 };
 }  // namespace transitions
 }  // namespace model

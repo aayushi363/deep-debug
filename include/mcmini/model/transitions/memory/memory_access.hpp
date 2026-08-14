@@ -61,6 +61,15 @@ struct memory_access : public model::transition {
            std::to_string(access_size) + ", site:" +
            std::to_string(site_id) + ")";
   }
+
+  std::string to_json() const override {
+    return "{" + json_header()
+        + ",\"op\":\"memory_" + (is_read() ? "read" : "write") + "\""
+        + ",\"addr\":" + std::to_string(address)
+        + ",\"size\":" + std::to_string(access_size)
+        + ",\"site\":" + std::to_string(site_id)
+        + "}";
+  }
 };
 
 }  // namespace transitions

@@ -24,6 +24,9 @@ struct thread_join : public model::transition {
   std::string to_string() const override {
     return "pthread_join(thread: " + std::to_string(target) + ")";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"thread_join\",\"child\":" + std::to_string(target) + "}";
+  }
 
   // MARK: Dependencies
   bool depends(const model::transition* t) const {

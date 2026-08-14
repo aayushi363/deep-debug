@@ -22,6 +22,9 @@ struct process_exit : public model::transition {
   int program_exit_code() const override { return exit_code; }
 
   std::string to_string() const override { return "exit(2) (syscall)"; }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"process_exit\",\"exit_code\":" + std::to_string(exit_code) + "}";
+  }
 };
 
 }  // namespace transitions

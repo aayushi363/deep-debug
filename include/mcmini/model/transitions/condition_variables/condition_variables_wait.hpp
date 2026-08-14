@@ -58,6 +58,10 @@ struct condition_variable_wait : public model::transition {
     return "thread: " + std::to_string(executor) + " pthread_cond_wait (cond: )" + std::to_string(cond_id)
             + ", mutex: " + std::to_string(mutex_id) + ") (asleep -> awake)";
   }
+  std::string to_json() const override {
+    return "{" + json_header() + ",\"op\":\"cond_wait_wake\",\"obj_id\":" + std::to_string(cond_id)
+           + ",\"mutex\":" + std::to_string(mutex_id) + "}";
+  }
 
   // MARK: Model checking functions
   bool depends(const condition_variable_init* ci) const {
