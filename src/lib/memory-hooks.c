@@ -50,7 +50,8 @@ static void mcmini_memory_access(void *addr, size_t size, uintptr_t site_id,
     case PRE_CHECKPOINT_THREAD:
     case CHECKPOINT_THREAD:
     case RECORD:
-    case PRE_CHECKPOINT: {
+    case PRE_CHECKPOINT:
+    case FUZZER_STANDALONE: {
       break;
     }
     case DMTCP_RESTART_INTO_BRANCH:

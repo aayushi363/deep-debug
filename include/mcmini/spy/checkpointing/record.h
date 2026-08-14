@@ -120,6 +120,11 @@ extern "C" {
  * directly launching the program. Userspace threads assume they are under the
  * control of the model checker.
  *
+ * FUZZER_STANDALONE: libmcmini.so is LD_PRELOAD'd into the SUT and running
+ * without any mcmini binary coordinator or DMTCP. Its role is to intercept
+ * pthread ops, emit fuzz_emit_tag events for the fuzzer, and forward the
+ * call to libpthread. No shadow record, no mailbox, no scheduling logic.
+ * Selected by the MCMINI_FUZZER_STANDALONE environment variable at load time.
  */
 enum libmcmini_mode {
   PRE_DMTCP_INIT,
@@ -136,6 +141,7 @@ enum libmcmini_mode {
   // i.e. classic McMini.
   TARGET_TEMPLATE,
   TARGET_BRANCH,
+  FUZZER_STANDALONE,
 };
 
 /**

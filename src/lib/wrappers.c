@@ -17,6 +17,7 @@
 #include "mcmini/wrapper_timing.h"
 #include "mcmini/spy/checkpointing/lockset.h"
 #include "deadlock_detector.h"
+#include "json_events.h"
 
 // This function will run automatically when libmcmini.so is loaded.
 __attribute__((constructor))
@@ -99,7 +100,13 @@ runner_id_t search_pthread_map(pthread_t t) {
     pthread_map_t *cur = head;
     while (cur) {
         if (pthread_equal(cur->thread, t)) {
-            return cur->value;
+            // BUGFIX: release the read-lock on the hit path too. The original
+            // returned here still holding the rdlock, so the NEXT
+            // insert_pthread_map (write-lock) — e.g. the second pthread_create's
+            // child registering — would block forever, wedging the scheduler.
+            runner_id_t v = cur->value;
+            pthread_rwlock_unlock(&pthread_map_lock);
+            return v;
         }
         cur = cur->next;
     }
@@ -188,6 +195,8 @@ void thread_block_indefinitely(void) {
 int mc_pthread_mutex_init(pthread_mutex_t *mutex,
                           const pthread_mutexattr_t *attr) {
   // FIXME: Only handles NORMAL mutexes
+  if (mc_in_wrapper) return libpthread_mutex_init(mutex, attr);
+
   MEASURE_FUNCTION_TIME
   if (attr != NULL) {
     int type;
@@ -198,8 +207,22 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
-      return libpthread_mutex_init(mutex, attr);
+    case CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
+      // M2.1: single-step through the in-SUT scheduler. Announce the op, park
+      // until the scheduler releases us, then log (in scheduled order) + do it.
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = MUTEX_INIT_TYPE;
+      memcpy_v(mb->cnts, &mutex, sizeof(mutex));
+      thread_wake_scheduler_and_wait();
+      write_pthread_event("MUTEX_INIT",
+                      get_json_thread_id(),
+                      (uint32_t)(uintptr_t)mutex,
+                      next_json_seqno());
+      int rc = libpthread_mutex_init(mutex, attr);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -256,6 +279,9 @@ int mc_pthread_mutex_init(pthread_mutex_t *mutex,
 }
 
 int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
+  if (mc_in_wrapper) {
+    return libpthread_mutex_lock(mutex);   // nested — pass through, no emit
+      }
   MEASURE_FUNCTION_TIME
   // On entry, there are several cases:
   //
@@ -281,8 +307,23 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
-      return libpthread_mutex_lock(mutex);
+    case CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
+
+      // M2.1: announce LOCK, park; the scheduler only releases us when the
+      // mutex is free, so the real lock below never blocks.
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = MUTEX_LOCK_TYPE;
+      memcpy_v(mb->cnts, &mutex, sizeof(mutex));
+      thread_wake_scheduler_and_wait();
+      write_pthread_event("MUTEX_LOCK",
+                          get_json_thread_id(),
+                          (uint32_t)(uintptr_t)mutex,
+                          next_json_seqno());
+      int rc = libpthread_mutex_lock(mutex);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -364,12 +405,27 @@ int mc_pthread_mutex_lock(pthread_mutex_t *mutex) {
 }
 
 int mc_pthread_mutex_unlock(pthread_mutex_t *mutex) {
+  if (mc_in_wrapper) return libpthread_mutex_unlock(mutex);
   MEASURE_FUNCTION_TIME
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
-      return libpthread_mutex_unlock(mutex);
+    case CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
+      
+      // M2.1: announce UNLOCK (always enabled), park, then unlock.
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = MUTEX_UNLOCK_TYPE;
+      memcpy_v(mb->cnts, &mutex, sizeof(mutex));
+      thread_wake_scheduler_and_wait();
+       write_pthread_event("MUTEX_UNLOCK",
+                      get_json_thread_id(),
+                      (uint32_t)(uintptr_t)mutex,
+                      next_json_seqno());
+      int rc = libpthread_mutex_unlock(mutex);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -611,6 +667,21 @@ void *mc_thread_routine_wrapper(void *arg) {
       thread_await_scheduler();
       break;
     }
+    case FUZZER_STANDALONE: {
+      // M2.1: this new runner is already registered (top of this function).
+      // Signal the creator it exists, then park until the scheduler releases us
+      // for the first time; only then run the routine body. This keeps the
+      // scheduler in control from the thread's very first step.
+      libpthread_sem_post(&unwrapped_arg->mc_pthread_create_binary_sem);
+      thread_await_scheduler();
+      mc_in_wrapper = 1;
+      write_pthread_event("THREAD_START",
+                      get_json_thread_id(),
+                      (uint32_t)(uintptr_t)pthread_self(),
+                      next_json_seqno());
+      mc_in_wrapper = 0;
+      break;
+    }
     default: {
       libc_abort();
     }
@@ -646,6 +717,20 @@ void *mc_thread_routine_wrapper(void *arg) {
     }
     case TARGET_BRANCH:
     case TARGET_BRANCH_AFTER_RESTART: {
+      mc_exit_thread_in_child();
+      break;
+    }
+    case FUZZER_STANDALONE: {
+      // M2.1: log the exit, then announce THREAD_EXIT through the mailbox and
+      // block. mc_exit_thread_in_child() wakes the scheduler, waits for release,
+      // wakes it once more (finish transition), and blocks forever — the
+      // scheduler marks this runner EXITED. It does not return.
+      mc_in_wrapper = 1;
+      write_pthread_event("THREAD_EXIT",
+                      get_json_thread_id(),
+                      (uint32_t)(uintptr_t)pthread_self(),
+                      next_json_seqno());
+      mc_in_wrapper = 0;
       mc_exit_thread_in_child();
       break;
     }
@@ -701,6 +786,9 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
   // NOTE: We're assuming that DMTCP creates only the checkpoint thread
   // immediately after sending the `DMTCP_EVENT_INIT` to `libmcmini.so`
   // and creates no other threads during execution
+  if (mc_in_wrapper) {
+        return libpthread_pthread_create(thread, attr, routine, arg);
+      }
   static pthread_once_t main_thread_once = PTHREAD_ONCE_INIT;
 
   // TODO: Reduce code duplication here!
@@ -807,6 +895,34 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
       thread_wake_scheduler_and_wait();
       return rv;
     }
+    case FUZZER_STANDALONE: {
+      // M2.1: create the child (it registers + parks awaiting the scheduler),
+      // wait until it has registered, then announce THREAD_CREATE with the
+      // child's runner id so the scheduler adds it to the runnable set.
+      mc_in_wrapper = 1;
+      struct mc_thread_routine_arg *libmcmini_controlled_thread_arg =
+          malloc(sizeof(struct mc_thread_routine_arg));
+      libmcmini_controlled_thread_arg->arg = arg;
+      libmcmini_controlled_thread_arg->routine = routine;
+      libpthread_sem_init(
+          &libmcmini_controlled_thread_arg->mc_pthread_create_binary_sem, 0, 0);
+      const int rv =
+          libpthread_pthread_create(thread, attr, &mc_thread_routine_wrapper,
+                                    libmcmini_controlled_thread_arg);
+      libpthread_sem_wait(
+          &libmcmini_controlled_thread_arg->mc_pthread_create_binary_sem);
+      runner_id_t child_rid = search_pthread_map(*thread);
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      memcpy_v(mb->cnts, &child_rid, sizeof(runner_id_t));
+      mb->type = THREAD_CREATE_TYPE;
+      thread_wake_scheduler_and_wait();
+      write_pthread_event("THREAD_CREATE",
+                          get_json_thread_id(),
+                          (uint32_t)(uintptr_t)(*thread),
+                          next_json_seqno());
+      mc_in_wrapper = 0;
+      return rv;
+    }
     default: {
       libc_abort();
     }
@@ -814,6 +930,8 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 }
 
 int mc_pthread_join(pthread_t t, void **rv) {
+  if (mc_in_wrapper) return libpthread_pthread_join(t, rv);
+
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT: {
       // This case implies that DMTCP attempted to join
@@ -889,6 +1007,24 @@ int mc_pthread_join(pthread_t t, void **rv) {
       thread_wake_scheduler_and_wait();
       return 0;
     }
+    case FUZZER_STANDALONE: {
+      // M2.1: announce JOIN(target). The scheduler only releases us once the
+      // target has EXITED, so the join is logically satisfied; we return 0
+      // without a real libpthread join (the target thread is parked forever in
+      // mc_exit_thread_in_child, so a real join would block).
+      mc_in_wrapper = 1;
+      runner_id_t rid = search_pthread_map(t);
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      memcpy_v(mb->cnts, &rid, sizeof(runner_id_t));
+      mb->type = THREAD_JOIN_TYPE;
+      thread_wake_scheduler_and_wait();
+      write_pthread_event("THREAD_JOIN",
+                      get_json_thread_id(),
+                      (uint32_t)(uintptr_t)t,
+                      next_json_seqno());
+      mc_in_wrapper = 0;
+      return 0;
+    }
     default: {
       libc_abort();
     }
@@ -916,7 +1052,8 @@ int mc_pthread_cond_init(pthread_cond_t *cond,
                          const pthread_condattr_t *attr) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
-    case PRE_CHECKPOINT_THREAD: {
+    case PRE_CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_cond_init(cond, attr);
     }
     case RECORD:
@@ -967,7 +1104,8 @@ int mc_pthread_cond_init(pthread_cond_t *cond,
 int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
   switch (get_current_mode()){
     case PRE_DMTCP_INIT:
-    case PRE_CHECKPOINT_THREAD: {
+    case PRE_CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_cond_wait(cond, mutex);
     }
     case RECORD:
@@ -1124,7 +1262,8 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
 int mc_pthread_cond_signal(pthread_cond_t *cond) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
-    case PRE_CHECKPOINT_THREAD: {
+    case PRE_CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_cond_signal(cond);
     }
     case RECORD:
@@ -1224,7 +1363,8 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
 int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
-    case PRE_CHECKPOINT_THREAD: {
+    case PRE_CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_cond_broadcast(cond);
     }
     case RECORD:
@@ -1286,7 +1426,8 @@ int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
 int mc_pthread_cond_destroy(pthread_cond_t *cond) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
-    case PRE_CHECKPOINT_THREAD: {
+    case PRE_CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_cond_destroy(cond);
     }
     case RECORD:

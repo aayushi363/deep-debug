@@ -80,6 +80,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Send this JSON to a certain file:
+    const char* message = "{ \"antithesis_setup\": { \"status\": \"complete\", \"details\": null } }";
+    const char* path = getenv("ANTITHESIS_OUTPUT_DIR");
+    char filename[1000];
+    sprintf(filename, "%s/mcmini.json", path);
+    FILE* event_stream_file = fopen(filename, "w");
+    fprintf(event_stream_file, "%s\n", message);
+    fflush(event_stream_file);
+
+
     int total = argc - 1;
     int n1 = total / 2;
     int n2 = total - n1;
@@ -112,3 +122,4 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[main] done\n");
     return 0;
 }
+  

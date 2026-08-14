@@ -324,6 +324,36 @@ void classic_dpor::continue_dpor_by_expanding_trace_with(
   this->dynamically_update_backtrack_sets(context);
 }
 
+classic_dpor::recorded_analysis classic_dpor::analyze_recorded(
+    coordinator &coordinator, const std::vector<runner_id_t> &schedule) {
+  // Set up the DPOR stack exactly as verify_using does (initial state s_0), then
+  // follow the *recorded* schedule instead of running a live DFS. Each step
+  // reuses continue_dpor_by_expanding_trace_with, which calls
+  // coordinator.execute_runner (here backed by a recorded_process), then
+  // grow_stack_after_running + dynamically_update_backtrack_sets. There is no
+  // backtrack phase: after replaying, the stack's backtrack sets record where a
+  // real DPOR search would diverge — which is exactly what the fuzzer reads out.
+  dpor_context context(coordinator);
+  context.stack.emplace_back(
+      clock_vector(),
+      coordinator.get_current_program_model().get_enabled_runners());
+  for (const runner_id_t rid : schedule)
+    this->continue_dpor_by_expanding_trace_with(rid, context);
+
+  recorded_analysis out;
+  out.deadlocked = coordinator.get_current_program_model().is_in_deadlock();
+  out.depth = static_cast<uint32_t>(context.transition_stack_size());
+  for (const auto &si : context.stack) {
+    const model::transition *ot = si.get_out_transition();
+    out.ran.push_back(ot ? ot->get_executor() : RUNNER_ID_MAX);
+    const auto &bs = si.get_backtrack_set();
+    out.backtrack_sets.emplace_back(bs.begin(), bs.end());
+    const auto &en = si.get_enabled_runners();
+    out.enabled_sets.emplace_back(en.begin(), en.end());
+  }
+  return out;
+}
+
 void classic_dpor::grow_stack_after_running(dpor_context &context) {
   // In this method, the following invariants are assumed to hold:
   //

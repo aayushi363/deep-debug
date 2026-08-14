@@ -14,7 +14,8 @@ int mc_sem_init(sem_t *sem, int p, unsigned count) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_sem_init(sem, p, count);
     }
     case RECORD:
@@ -74,7 +75,8 @@ int mc_sem_destroy(sem_t *sem) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_sem_destroy(sem);
     }
     case RECORD:
@@ -135,7 +137,8 @@ mc_sem_post(sem_t *sem) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_sem_post(sem);
     }
     case RECORD:
@@ -194,7 +197,8 @@ int mc_sem_wait(sem_t *sem) {
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD: {
+    case CHECKPOINT_THREAD:
+    case FUZZER_STANDALONE: {
       return libpthread_sem_wait(sem);
     }
     case RECORD:

@@ -70,11 +70,13 @@ set(LIBMCMINI_C_SRC
   src/lib/dmtcp-callback.c
   src/lib/entry.c
   src/lib/interception.c
+  src/lib/json_events.c
   src/lib/log.c
   src/lib/lockset.c
   src/lib/memory-hooks.c
   src/lib/wrapper_timing.c
   src/lib/main.c
+  src/lib/inproc_scheduler.c
   src/lib/deadlock_detector.c
   src/lib/record.c
   src/lib/sem-wrappers.c
@@ -111,6 +113,58 @@ target_compile_options(libmcmini
 target_link_libraries(libmcmini
   PUBLIC
     "${LIBMCMINI_EXTRA_LINK_FLAGS}")
+
+# libmcmini_intelligence.so -> fuzzer-side "split DPOR": mcmini's model + classic
+# DPOR compiled WITHOUT the DMTCP/real_world concretes, exposed via a C ABI
+# (include/mcmini/intelligence/mcmini_intelligence.h). The Antithesis fuzzer
+# links this to reuse mcmini's reduction over schedules the SUT already produced.
+# NOTE: this is the model/model_checking/coordinator subset ONLY — no
+# real_world/*.cpp (dmtcp/fork process sources) and no mcmini.cpp/signal.cpp.
+set(MCMINI_INTEL_SRC
+  src/mcmini/constants.cpp
+  src/mcmini/visible_object.cpp
+  src/mcmini/coordinator/coordinator.cpp
+  src/mcmini/log/filter.cpp
+  src/mcmini/log/logger.cpp
+  src/mcmini/model/detached_state.cpp
+  src/mcmini/model/diff_state.cpp
+  src/mcmini/model/program.cpp
+  src/mcmini/model/cond_var_arbitrary_policy.cpp
+  src/mcmini/model/cond_var_default_policy.cpp
+  src/mcmini/model/cond_var_single_grp_policy.cpp
+  src/mcmini/model/cond_var_wakegroup.cpp
+  src/mcmini/model/state_sequence.cpp
+  src/mcmini/model/transition_registry.cpp
+  src/mcmini/model/transition_sequence.cpp
+  src/mcmini/model/transitions/condition_variables.cpp
+  src/mcmini/model/transitions/memory.cpp
+  src/mcmini/model/transitions/mutex.cpp
+  src/mcmini/model/transitions/process.cpp
+  src/mcmini/model/transitions/thread.cpp
+  src/mcmini/model/transitions/semaphore.cpp
+  src/mcmini/model_checking/algorithms/classic_dpor.cpp
+  src/mcmini/model_checking/algorithms/clock_vector.cpp
+  src/common/mem.c
+  src/mcmini/intelligence/mcmini_intelligence.cpp
+)
+add_library(mcmini_intelligence SHARED "${MCMINI_INTEL_SRC}")
+set_target_properties(mcmini_intelligence PROPERTIES OUTPUT_NAME "mcmini_intelligence")
+target_include_directories(mcmini_intelligence PUBLIC "${MCMINI_INCLUDE_DIR}")
+target_compile_options(mcmini_intelligence PRIVATE -Wall -fPIC)
+
+# mcmini_intel_selftest -> a tiny binary that dynamically links the lib above and
+# runs the AB-BA deadlock case through the C ABI. Lets a notebook `podman exec`
+# it to confirm the DPOR engine builds AND runs inside the deployed container.
+add_executable(mcmini_intel_selftest src/mcmini/intelligence/selftest.cpp)
+target_include_directories(mcmini_intel_selftest PUBLIC "${MCMINI_INCLUDE_DIR}")
+target_link_libraries(mcmini_intel_selftest mcmini_intelligence)
+# Resolve libmcmini_intelligence.so relative to the binary ($ORIGIN) — it is
+# installed next to the selftest in /opt/deep-debug/build. Bake this at build
+# time so no forbidden /build sandbox path lands in the RPATH (nix fixup fails
+# otherwise).
+set_target_properties(mcmini_intel_selftest PROPERTIES
+  BUILD_WITH_INSTALL_RPATH TRUE
+  INSTALL_RPATH "$ORIGIN")
 
 add_executable(mcmini "${MCMINI_CPP_SRC}" "${MCMINI_C_SRC}")
 target_include_directories(mcmini PUBLIC "${MCMINI_INCLUDE_DIR}")

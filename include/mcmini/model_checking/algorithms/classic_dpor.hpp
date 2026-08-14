@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include "mcmini/misc/ddt.hpp"
 #include "mcmini/model_checking/algorithm.hpp"
 #include "mcmini/model_checking/algorithms/classic_dpor/runner_item.hpp"
@@ -44,6 +47,33 @@ public:
 
   classic_dpor() = default;
   classic_dpor(configuration config) : config(std::move(config)) {}
+
+  // --- Fuzzer-side "split DPOR" (libmcmini_intelligence) ---------------------
+  // Result of replaying ONE recorded schedule through the model and running the
+  // standard classic-DPOR bookkeeping after each step — WITHOUT a live search or
+  // backtrack re-execution. This is how the Antithesis fuzzer reuses mcmini's
+  // reduction: it drives the model along a schedule the SUT already produced,
+  // then reads out where DPOR wants to diverge next.
+  struct recorded_analysis {
+    bool deadlocked = false;
+    uint32_t depth = 0;  // number of transitions executed
+    // Indexed by state (0 .. depth). `ran[i]` is the runner whose transition
+    // leaves state i (RUNNER_ID_MAX for the final state); `backtrack_sets[i]`
+    // and `enabled_sets[i]` are the DPOR backtrack set and enabled set at i.
+    std::vector<runner_id_t> ran;
+    std::vector<std::vector<runner_id_t>> backtrack_sets;
+    std::vector<std::vector<runner_id_t>> enabled_sets;
+  };
+
+  // Drive `coord`'s model along `schedule` (runner ids in execution order),
+  // running grow_stack_after_running / dynamically_update_backtrack_sets after
+  // each step, and return the deadlock flag plus per-state backtrack/enabled
+  // sets. `coord` MUST be configured so execute_runner(rid) advances the model
+  // to rid's next recorded transition (see libmcmini_intelligence's
+  // recorded_process). Reuses the live-search bookkeeping verbatim; performs no
+  // backtracking re-execution of its own.
+  recorded_analysis analyze_recorded(coordinator &coord,
+                                     const std::vector<runner_id_t> &schedule);
 
 private:
   configuration config;

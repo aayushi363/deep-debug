@@ -16,6 +16,7 @@
 
 #include "dmtcp.h"
 #include "mcmini/mcmini.h"
+#include "mcmini/lib/inproc_scheduler.h"
 #include "deadlock_detector.h"
 
 volatile void *global_shm_start = NULL;
@@ -96,8 +97,21 @@ __attribute__((constructor)) void libmcmini_main() {
   if (dmtcp_is_enabled()) {
     // The libmcmini plugin of DMTCP has been loaded.
     // We must be in recording mode.  Don't do model checking yet.
+    fprintf(stderr, "[DEBUG] libmcmini_main: taking dmtcp_is_enabled() branch — mode NOT set to FUZZER_STANDALONE\n");
+    fflush(stderr);
     return;
   }
+   if (getenv("MCMINI_FUZZER_STANDALONE")) {
+    set_current_mode(FUZZER_STANDALONE);
+    // M2.1: stand up the in-SUT runner_mailbox scheduler (allocates in-process
+    // mailboxes, registers main as runner 0, spawns the scheduler thread). From
+    // here on the mutex/thread wrappers single-step through the mailbox and the
+    // decision byte selects which enabled runner runs next.
+    inproc_scheduler_init();
+    return;
+  }
+   fprintf(stderr, "[DEBUG] libmcmini_main: falling through to standard model checking (this WILL shm_open and probably fail)\n");
+  fflush(stderr);
   // ************************************************
   // STANDARD MODEL CHECKING (NO DEEP DEBUGGING)
   // ************************************************
@@ -122,6 +136,8 @@ __attribute__((constructor)) void libmcmini_main() {
     // parent process (aka the template) will never exit
     // the above call to `mc_template_process_loop_forever()`.
   }
+
+ 
   set_current_mode(TARGET_BRANCH);
   thread_await_scheduler();
 }
