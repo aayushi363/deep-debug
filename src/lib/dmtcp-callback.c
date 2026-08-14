@@ -22,7 +22,13 @@
 #include "dmtcp.h"
 #include "mcmini/mcmini.h"
 #include "mcmini/wrapper_timing.h"
+#include "mcmini/spy/checkpointing/rec_list.h"
 #include "deadlock_detector.h"
+
+// libmcmini's per-rollout in-memory record of every visible pthread object's
+// current state. Linked list, head pointer is `head_record_mode` (record.c).
+// We walk this at emit time to fingerprint the deadlocked state.
+extern rec_list *head_record_mode;
 
 #define SIG_MULTITHREADED_FORK (SIGRTMIN+6)
 
@@ -495,6 +501,128 @@ static void *template_thread(void *unused) {
 //   return 0;
 // }
 
+// FNV-1a 64-bit hash step over a 64-bit value (LSB-first byte stream).
+// Used to fold each visible_object's relevant state fields into a content-
+// based trace_id so equivalent deadlocked states across rollouts collide.
+static uint64_t fnv1a64_u64(uint64_t h, uint64_t v) {
+  for (int i = 0; i < 8; ++i) {
+    h ^= (uint8_t)(v & 0xffu);
+    h *= 1099511628211ULL;
+    v >>= 8;
+  }
+  return h;
+}
+
+// Emit a phase-1 mcmini_schedule line to stderr at process exit. Antithesis
+// captures the line as a Guest event whose `output_text` carries the prefix
+// + JSON; the deep_debug strategy strips the prefix and parses. Idempotent
+// across all termination paths (atexit, DMTCP_EVENT_EXIT, wrapper_timing
+// signal watcher, deadlock_detector trip).
+//
+// Walks libmcmini's `head_record_mode` rec_list — the in-memory snapshot of
+// every visible pthread object's current state — and serializes each entry
+// into the `events` JSON array. A content hash of the same data becomes
+// `trace_id`, so two rollouts that produce equivalent deadlocked states map
+// to the same id (enabling structural dedupe in the strategy).
+//
+// `outcome` is hardcoded "deadlock" because the only caller in record mode
+// is the deadlock detector's trip path; clean exits go through atexit but in
+// that case the rec_list still reflects a quiescent state and is harmless.
+//
+// Uses stderr (not $ANTITHESIS_OUTPUT_DIR/sdk.jsonl): file writes to sdk.jsonl
+// hang mid-rollout under the fuzzing campaign's snapshot machinery; stderr
+// is unaffected.
+void mcmini_emit_phase1_stub(void) {
+  static int emitted = 0;
+  static __thread int in_emit = 0;
+  if (emitted || in_emit) return;
+  in_emit = 1;
+  emitted = 1;
+
+  // Build the events JSON array first so we can compute the content hash and
+  // splice the count + hash into the final outer record.
+  // No rec_list lock taken: deadlocked threads aren't mutating the list (they
+  // are blocked inside libpthread_mutex_timedlock); other writers add at the
+  // current tail and never free, so a dirty forward walk is safe.
+  char events_buf[8192];
+  int e = 0;
+  events_buf[e++] = '[';
+  uint64_t hash = 14695981039346656037ULL; // FNV-1a 64-bit offset basis
+  int object_count = 0;
+  int first = 1;
+
+  for (rec_list *node = head_record_mode; node != NULL; node = node->next) {
+    // Reserve ~256 bytes for the worst-case entry + trailing punctuation.
+    if (e >= (int)sizeof(events_buf) - 256) break;
+    if (!first) events_buf[e++] = ',';
+    first = 0;
+    object_count++;
+
+    hash = fnv1a64_u64(hash, (uint64_t)node->vo.type);
+    switch (node->vo.type) {
+      case MUTEX:
+        e += snprintf(events_buf + e, sizeof(events_buf) - e,
+                      "{\"type\":\"mutex\",\"state\":%d}",
+                      (int)node->vo.mut_state);
+        hash = fnv1a64_u64(hash, (uint64_t)node->vo.mut_state);
+        break;
+      case SEMAPHORE:
+        e += snprintf(events_buf + e, sizeof(events_buf) - e,
+                      "{\"type\":\"semaphore\",\"count\":%u,\"status\":%d}",
+                      node->vo.sem_state.count,
+                      (int)node->vo.sem_state.status);
+        hash = fnv1a64_u64(hash, (uint64_t)node->vo.sem_state.count);
+        hash = fnv1a64_u64(hash, (uint64_t)node->vo.sem_state.status);
+        break;
+      case CONDITION_VARIABLE:
+        e += snprintf(events_buf + e, sizeof(events_buf) - e,
+                      "{\"type\":\"cond\",\"status\":%d,\"count\":%d}",
+                      (int)node->vo.cond_state.status,
+                      node->vo.cond_state.count);
+        hash = fnv1a64_u64(hash, (uint64_t)node->vo.cond_state.status);
+        hash = fnv1a64_u64(hash, (uint64_t)node->vo.cond_state.count);
+        break;
+      case THREAD:
+        e += snprintf(events_buf + e, sizeof(events_buf) - e,
+                      "{\"type\":\"thread\",\"id\":%d,\"status\":%d}",
+                      (int)node->vo.thrd_state.id,
+                      (int)node->vo.thrd_state.status);
+        hash = fnv1a64_u64(hash, (uint64_t)node->vo.thrd_state.id);
+        hash = fnv1a64_u64(hash, (uint64_t)node->vo.thrd_state.status);
+        break;
+      default:
+        e += snprintf(events_buf + e, sizeof(events_buf) - e,
+                      "{\"type\":\"other\",\"raw\":%d}",
+                      (int)node->vo.type);
+        break;
+    }
+  }
+  events_buf[e++] = ']';
+  events_buf[e] = '\0';
+
+  // Strategy deserializes trace_id as i64; mask the sign bit to keep positive.
+  int64_t trace_id = (int64_t)(hash & 0x7fffffffffffffffULL);
+  unsigned long total_transitions = deadlock_detector_get_progress();
+
+  char buf[16384];
+  int n = snprintf(buf, sizeof(buf),
+                   "MCMINI_SCHEDULE_JSON: "
+                   "{\"mcmini_schedule\":{"
+                   "\"events\":%s,"
+                   "\"outcome\":\"deadlock\","
+                   "\"pending\":[],"
+                   "\"stats\":{\"total_transitions\":%lu,\"object_count\":%d},"
+                   "\"trace_id\":%lld"
+                   "}}\n",
+                   events_buf,
+                   total_transitions,
+                   object_count,
+                   (long long)trace_id);
+  if (n > 0) (void)write(2, buf, (size_t)n);
+
+  in_emit = 0;
+}
+
 __attribute__((constructor)) void libmcmini_event_late_init() {
   // AddSegvHandler();
   if (!dmtcp_is_enabled()) {
@@ -516,6 +644,20 @@ __attribute__((constructor)) void libmcmini_event_late_init() {
   // Hence, we initialization ONLY NOW, and there is not danger that the
   // wrapper functions will unexpectedly recurse on themselves.
   libmcmini_init();
+
+  // Phase 1: register the stub-emitter via atexit so it fires on normal exit
+  // regardless of DMTCP plugin lifecycle. The DMTCP_EVENT_EXIT case also
+  // calls this; the helper itself is idempotent (static guard).
+  atexit(mcmini_emit_phase1_stub);
+  fprintf(stderr, "[mcmini-emit] registered atexit handler in libmcmini_event_late_init\n");
+
+  // Removed: library-load emit. Earlier we called mcmini_emit_phase1_stub()
+  // here as an unblock when atexit didn't fire, but library-load writes land
+  // at very early vtimes (during pthread library setup) which always fall in
+  // the historical timeline, not in per-rollout spans. The single emit-at-
+  // termination path (wrapper_timing watcher + deadlock_detector) is the
+  // intended design — it fires at end-of-rollout vtimes that should land in
+  // the rollout's event span.
 
   // We also initialize the semaphore used by the wrapper functions
   // AFTER DMTCP restart. This ensures that the semaphore is properly
@@ -742,6 +884,13 @@ static void presuspend_eventHook(DmtcpEvent_t event, DmtcpEventData_t *data) {
       // Why? If we set
       set_current_mode(PRE_CHECKPOINT_THREAD);
       log_verbose("DMTCP_EVENT_INIT");
+      break;
+    }
+    case DMTCP_EVENT_EXIT: {
+      // Belt-and-suspenders: also trigger the Phase 1 emit on this DMTCP event.
+      // The helper is idempotent so this won't double-emit if atexit also runs.
+      fprintf(stderr, "[mcmini-emit] DMTCP_EVENT_EXIT fired\n");
+      mcmini_emit_phase1_stub();
       break;
     }
     case DMTCP_EVENT_PRESUSPEND:

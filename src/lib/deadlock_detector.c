@@ -13,20 +13,48 @@
 #include <unistd.h>
 #include <pthread.h>
 
+/* Phase 1 experiment: emit a schedule stub before exit so the strategy can see
+ * the rollout terminated via the deadlock detector path. Defined in
+ * dmtcp-callback.c. */
+extern void mcmini_emit_phase1_stub(void);
+
 // Thresholds and counters
 static struct timespec prev_cpu_time = {0, 0};
 static atomic_int quiet_intervals = 0;
-// Number of consecutive low-CPU intervals before we declare deadlock
-// Use the user's requested N = 100.
-static const int QUIET_THRESHOLD = 100;
-// The minimum CPU time (in nanoseconds) that counts as "progress"
-// If less than this between ticks, we consider that "no CPU progress".
-static const long PROGRESS_NSEC = 5000000; // 5 ms
-/* Livelock detection parameters */
-/* If no progress for this many samples (~10ms per sample), consider it stalled */
-static const long PROG_NO_ADVANCE_SAMPLES = 1000; /* ~10s - generous timeout for cond_wait scenarios */
-/* If CPU-time advanced by more than this while no progress, treat as livelock */
-static const unsigned long CPU_BUSY_THRESHOLD_NS = 1000000000UL; /* 1 second - very generous to account for cond_wait timeout loops */
+// Number of consecutive low-CPU intervals before we declare deadlock.
+// Default: 100 ticks * 10ms = 1 second. Override via MCMINI_DEADLOCK_QUIET_THRESHOLD.
+static int QUIET_THRESHOLD = 100;
+// The minimum CPU time (in nanoseconds) that counts as "progress".
+// Default: 5ms. Override via MCMINI_DEADLOCK_PROGRESS_NSEC.
+// Under Antithesis VM-level fault injection, threads make less CPU progress
+// per wall-clock tick — lower values reduce false positives.
+static long PROGRESS_NSEC = 5000000;
+/* Livelock detection parameters - also configurable for Antithesis tolerance */
+static long PROG_NO_ADVANCE_SAMPLES = 1000;             /* ~10s default */
+static unsigned long CPU_BUSY_THRESHOLD_NS = 1000000000UL; /* 1 second default */
+
+/* If MCMINI_DEADLOCK_DETECTOR_DISABLE is set in the env, the detector is a
+ * no-op (no sampler thread spawned, no _exit). Useful when running under
+ * Antithesis where VM-level fault injection generates false positives. */
+static int detector_disabled_by_env = 0;
+
+static void init_deadlock_detector_from_env(void) {
+  static int initialized = 0;
+  if (initialized) return;
+  initialized = 1;
+
+  if (getenv("MCMINI_DEADLOCK_DETECTOR_DISABLE")) {
+    detector_disabled_by_env = 1;
+  }
+  const char *p = getenv("MCMINI_DEADLOCK_PROGRESS_NSEC");
+  if (p) PROGRESS_NSEC = strtol(p, NULL, 10);
+  const char *q = getenv("MCMINI_DEADLOCK_QUIET_THRESHOLD");
+  if (q) QUIET_THRESHOLD = atoi(q);
+  const char *s = getenv("MCMINI_DEADLOCK_PROG_NO_ADVANCE_SAMPLES");
+  if (s) PROG_NO_ADVANCE_SAMPLES = strtol(s, NULL, 10);
+  const char *c = getenv("MCMINI_DEADLOCK_CPU_BUSY_THRESHOLD_NS");
+  if (c) CPU_BUSY_THRESHOLD_NS = strtoul(c, NULL, 10);
+}
 // Occasional tick counter for debug printing
 static atomic_long tick_count = 0;
 // Progress counter: wrappers may still increment this (kept for compatibility),
@@ -84,11 +112,13 @@ static void *deadlock_detector_sampler_thread(void *arg) {
     if (total_nsec < PROGRESS_NSEC) {
       int q = atomic_fetch_add(&quiet_intervals, 1) + 1;
       if (q >= QUIET_THRESHOLD) {
-        /* Attempt to save timing report directly from the sampler thread.
-         * The sampler thread is created with the real pthread_create via
-         * libpthread_pthread_create, so it won't be recorded by mc_pthread_create
-         * and it's safe to call the non-async-safe save routine here.
-         */
+        /* Emit the schedule stub FIRST (single short stderr write) so it
+         * survives even if Antithesis kills the rollout during the larger
+         * save_timing_report below. Safe to call non-async-safe routines from
+         * the sampler thread: it was created via libpthread_pthread_create
+         * and is not in the recorded thread set. */
+        mcmini_emit_phase1_stub();
+        fprintf(stderr, "[deadlock_detector] tripped on QUIET_THRESHOLD (%d ticks); exiting\n", q);
         save_timing_report(NULL);
         _exit(1);
       }
@@ -108,7 +138,9 @@ static void *deadlock_detector_sampler_thread(void *arg) {
         unsigned long last_cpu_ns = atomic_load(&last_progress_cpu_ns);
         unsigned long cpu_advance = (curr_cpu_ns > last_cpu_ns) ? (curr_cpu_ns - last_cpu_ns) : 0UL;
         if (cpu_advance >= CPU_BUSY_THRESHOLD_NS) {
-          /* Save timing report directly from the sampler thread, then exit. */
+          /* See QUIET branch above: emit first, save_timing_report last. */
+          mcmini_emit_phase1_stub();
+          fprintf(stderr, "[deadlock_detector] tripped on livelock (cpu_advance=%lu ns); exiting\n", cpu_advance);
           save_timing_report(NULL);
           _exit(1);
         }
@@ -123,6 +155,16 @@ static void *deadlock_detector_sampler_thread(void *arg) {
 
 void mc_install_deadlock_detector(bool enable) {
   static bool installed = false;
+
+  /* Read env-var overrides once. Allows tuning thresholds for environments
+   * (like Antithesis) where VM-level fault injection causes CPU progress to
+   * appear slower than the defaults expect, leading to false positives. */
+  init_deadlock_detector_from_env();
+  if (detector_disabled_by_env) {
+    /* No-op: the detector is fully disabled by env var. */
+    return;
+  }
+
   if (enable && !installed) {
   installed = true;
 
@@ -161,4 +203,8 @@ void deadlock_detector_increment_progress(void) {
     unsigned long ns = (unsigned long)now.tv_sec * 1000000000UL + (unsigned long)now.tv_nsec;
     atomic_store(&last_progress_cpu_ns, ns);
   }
+}
+
+unsigned long deadlock_detector_get_progress(void) {
+  return (unsigned long)atomic_load(&progress_counter);
 }

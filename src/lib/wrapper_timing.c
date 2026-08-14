@@ -10,6 +10,11 @@
 #include <string.h>
 #include <sys/syscall.h>
 
+/* Phase 1: defined in dmtcp-callback.c. Called from the watcher thread on the
+ * signal-termination exit path (which uses _exit() and would otherwise bypass
+ * atexit handlers, hiding our schedule emit). */
+extern void mcmini_emit_phase1_stub(void);
+
 /* Raw syscall helpers using the `syscall` instruction directly so we don't hit
  * any libc-level wrappers that DMTCP may have LD_PRELOAD'd. These are at
  * file scope (not inside a function) so they compile cleanly.
@@ -157,6 +162,10 @@ static void *timing_report_watcher(void *arg) {
     while (1) {
         if (g_signal_received) {
             save_timing_report(NULL);
+            /* Phase 1: emit the schedule stub on the signal-terminated exit
+             * path. Without this, _exit() below would skip the atexit-registered
+             * handler in dmtcp-callback.c. The function is idempotent. */
+            mcmini_emit_phase1_stub();
             _exit(128 + (int)g_signal_received);
         }
         nanosleep(&sleep_ts, NULL);

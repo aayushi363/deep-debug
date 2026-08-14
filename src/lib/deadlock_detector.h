@@ -12,4 +12,9 @@ void mc_install_deadlock_detector(bool enable);
 // acquired, unlock, or other visible operation).
 void deadlock_detector_increment_progress(void);
 
+// Read the current progress counter value (count of recorded pthread
+// operations since the detector was installed). Used by the schedule-stub
+// emitter as the `total_transitions` stat.
+unsigned long deadlock_detector_get_progress(void);
+
 #endif // DEADLOCK_DETECTOR_H
