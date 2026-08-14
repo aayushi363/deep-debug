@@ -887,10 +887,15 @@ static void presuspend_eventHook(DmtcpEvent_t event, DmtcpEventData_t *data) {
       break;
     }
     case DMTCP_EVENT_EXIT: {
-      // Belt-and-suspenders: also trigger the Phase 1 emit on this DMTCP event.
-      // The helper is idempotent so this won't double-emit if atexit also runs.
-      fprintf(stderr, "[mcmini-emit] DMTCP_EVENT_EXIT fired\n");
-      mcmini_emit_phase1_stub();
+      // Don't emit from here. DMTCP fires EXIT at various lifecycle points
+      // (including dmtcp_launch's own setup phases and transient helper
+      // subprocesses) BEFORE rec_list is populated — observed locally as
+      // an early empty emit followed by a downstream crash. The real exit
+      // paths are covered:
+      //   - atexit(mcmini_emit_phase1_stub)        — normal target exit
+      //   - deadlock_detector trip                 — recorded deadlock
+      //   - wrapper_timing signal-watcher pre-_exit — signal-terminated exit
+      fprintf(stderr, "[mcmini-emit] DMTCP_EVENT_EXIT received (skipped)\n");
       break;
     }
     case DMTCP_EVENT_PRESUSPEND:

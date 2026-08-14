@@ -24,13 +24,13 @@ int thread_meal_count[N_PHIL] = {0};       // Individual meal counters
 #define THREAD_FLIP_TRIGGER (1200 + (rand() % 101))  // Even lower - flip after just 5 meals
 
 void do_think(int id) {
-    usleep(THINK_US + (rand() % (THINK_US / 2)));
+    sleep(THINK_US + (rand() % (THINK_US / 2)));
 }
 
 void do_eat(int id) {
     printf("Philosopher %d is eating\n", id);
     fflush(stdout);
-    usleep(EAT_US + (rand() % (EAT_US / 2)));
+    sleep(EAT_US + (rand() % (EAT_US / 2)));
 }
 
 // Picks forks in either deadlock-free or deadlock-prone order depending on 'flipped'
@@ -65,9 +65,9 @@ void pick_forks(int id) {
     if (current_flipped) {
         printf("Philosopher %d got fork %d, trying fork %d\n", id, first_fork, second_fork);
         fflush(stdout);
-        usleep(500000); // MUCH longer delay - 0.5 seconds
+        sleep(500000); // MUCH longer delay - 0.5 seconds
     } else {
-        usleep(USLEEP_SHORT);
+        sleep(USLEEP_SHORT);
     }
     pthread_mutex_lock(&forks[second_fork]);
 }

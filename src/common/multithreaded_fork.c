@@ -177,7 +177,7 @@ pid_t get_tid_from_pthread_descriptor(pthread_t pthread_descriptor) {
   int offset = pthreadDescriptorTidOffset();
   pid_t ctid = *(pid_t*)((char*)(pthread_descriptor) + offset);
 #ifdef DMTCP
-  pid_t virttid = dmtcp_real_to_virtual_pid(ctid);
+  pid_t virttid = dmtcp_pid_real_to_virtual(ctid);
   ctid = (virttid ? virttid : ctid);
 #endif
   return ctid;
@@ -209,7 +209,7 @@ int get_child_threads(int child_threads[]) {
       if (atoi(entry->d_name) != 0) {
         pid_t nexttid = atoi(entry->d_name);
 #ifdef DMTCP
-        pid_t virttid = dmtcp_real_to_virtual_pid(nexttid);
+        pid_t virttid = dmtcp_pid_real_to_virtual(nexttid);
         nexttid = (virttid ? virttid : nexttid);
 #endif
         child_threads[i++] = nexttid;

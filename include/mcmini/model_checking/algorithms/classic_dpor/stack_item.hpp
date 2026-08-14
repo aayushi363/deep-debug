@@ -2,7 +2,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
+#include <array>
 #include "mcmini/defines.h"
 #include "mcmini/model_checking/algorithms/classic_dpor/clock_vector.hpp"
 

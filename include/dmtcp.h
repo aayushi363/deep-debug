@@ -44,7 +44,7 @@
 #endif // ifdef __cplusplus
 
 /* Define to the version of this package. */
-#define DMTCP_PLUGIN_API_VERSION "3"
+#define DMTCP_PLUGIN_API_VERSION "4"
 
 #ifdef __cplusplus
 namespace dmtcp {
@@ -428,13 +428,13 @@ int dmtcp_protected_environ_fd(void);
  *  discovers a pid without going through a system call (e.g., through
  *  the proc filesystem), use this to virtualize the pid.
  */
-pid_t dmtcp_real_to_virtual_pid(pid_t realPid) __attribute((weak));
-pid_t dmtcp_virtual_to_real_pid(pid_t virtualPid) __attribute((weak));
+pid_t dmtcp_pid_real_to_virtual(pid_t realPid) __attribute((weak));
+pid_t dmtcp_pid_virtual_to_real(pid_t virtualPid) __attribute((weak));
 
 #define mcmini_virtual_pid(PID) \
-  (dmtcp_is_enabled() ? dmtcp_real_to_virtual_pid((PID)) : (PID))
+  (dmtcp_is_enabled() ? dmtcp_pid_real_to_virtual((PID)) : (PID))
 #define mcmini_real_pid(PID) \
-  (dmtcp_is_enabled() ? dmtcp_virtual_to_real_pid((PID)) : (PID))
+  (dmtcp_is_enabled() ? dmtcp_pid_virtual_to_real((PID)) : (PID))
 
 // bq_file -> "batch queue file"; used only by batch-queue plugin
 int dmtcp_is_bq_file(const char *path) __attribute((weak));

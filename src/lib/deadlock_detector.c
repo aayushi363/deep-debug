@@ -112,14 +112,14 @@ static void *deadlock_detector_sampler_thread(void *arg) {
     if (total_nsec < PROGRESS_NSEC) {
       int q = atomic_fetch_add(&quiet_intervals, 1) + 1;
       if (q >= QUIET_THRESHOLD) {
-        /* Emit the schedule stub FIRST (single short stderr write) so it
-         * survives even if Antithesis kills the rollout during the larger
-         * save_timing_report below. Safe to call non-async-safe routines from
-         * the sampler thread: it was created via libpthread_pthread_create
-         * and is not in the recorded thread set. */
+        /* Emit the schedule stub (single short stderr write). Safe to call
+         * non-async-safe routines from the sampler thread: it was created via
+         * libpthread_pthread_create and is not in the recorded thread set. */
         mcmini_emit_phase1_stub();
         fprintf(stderr, "[deadlock_detector] tripped on QUIET_THRESHOLD (%d ticks); exiting\n", q);
-        save_timing_report(NULL);
+        /* save_timing_report(NULL) intentionally omitted in phase 1: the
+         * TIMER_INFO diagnostic file isn't load-bearing and the writes
+         * lengthen the trip path / add stderr noise. */
         _exit(1);
       }
     } else {
@@ -138,10 +138,9 @@ static void *deadlock_detector_sampler_thread(void *arg) {
         unsigned long last_cpu_ns = atomic_load(&last_progress_cpu_ns);
         unsigned long cpu_advance = (curr_cpu_ns > last_cpu_ns) ? (curr_cpu_ns - last_cpu_ns) : 0UL;
         if (cpu_advance >= CPU_BUSY_THRESHOLD_NS) {
-          /* See QUIET branch above: emit first, save_timing_report last. */
+          /* See QUIET branch above: emit schedule stub; skip TIMER_INFO. */
           mcmini_emit_phase1_stub();
           fprintf(stderr, "[deadlock_detector] tripped on livelock (cpu_advance=%lu ns); exiting\n", cpu_advance);
-          save_timing_report(NULL);
           _exit(1);
         }
       }

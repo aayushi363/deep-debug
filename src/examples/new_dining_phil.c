@@ -13,7 +13,7 @@ void *philosopher(void *arg) {
     // terminal). With stdout, prints would sit in the FILE buffer and be lost
     // when the deadlock detector calls _exit(1) — _exit bypasses stdio flush.
     fprintf(stderr, "Philospher %d is trying to grab a fork \n", id);
-
+    usleep(1000);
     // ALL philosophers grab left first → circular wait when N≥3
     pthread_mutex_lock(&forks[left]);
     usleep(1000); // encourages interleaving

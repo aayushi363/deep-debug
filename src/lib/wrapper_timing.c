@@ -87,7 +87,7 @@ int register_thread_data(struct ThreadDataNode* node) {
 
 static void final_report_and_exit(int signum) {
     g_signal_received = signum;
-    const char msg[] = "[TIMER INFO] Signal received, scheduling report save\n";
+    const char msg[] = "[TIMER INFO] Signal received, exiting\n";
     write(STDERR_FILENO, msg, sizeof(msg)-1);
 }
 
@@ -161,10 +161,13 @@ static void *timing_report_watcher(void *arg) {
     struct timespec sleep_ts = {0, 10000000L}; /* 10ms */
     while (1) {
         if (g_signal_received) {
-            save_timing_report(NULL);
-            /* Phase 1: emit the schedule stub on the signal-terminated exit
-             * path. Without this, _exit() below would skip the atexit-registered
-             * handler in dmtcp-callback.c. The function is idempotent. */
+            /* Emit the schedule stub on the signal-terminated exit path.
+             * Without this, _exit() below would skip the atexit-registered
+             * handler in dmtcp-callback.c. The function is idempotent.
+             *
+             * save_timing_report intentionally omitted: it lengthens the
+             * Ctrl+C / signal exit path and the TIMER_INFO diagnostic file
+             * isn't load-bearing for phase 1. */
             mcmini_emit_phase1_stub();
             _exit(128 + (int)g_signal_received);
         }

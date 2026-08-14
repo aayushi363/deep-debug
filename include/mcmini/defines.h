@@ -1,7 +1,6 @@
 #pragma once
 
 #include <stdint.h>
-
 #define MCMINI_INLINE
 #define MCMINI_LIBRARY_ENTRY_POINT
 #define MCMINI_EXPORT __attribute__((visibility(default)))

@@ -108,6 +108,23 @@ static void emit_jsonl_schedule_base(std::ostream& os, uint32_t trace_id,
   }
   os << "],\"stats\":{\"total_transitions\":" << stats_.total_transitions << "}";
 }
+
+// Emit a fully-built schedule record to both g_jsonl_out (if --emit-jsonl was
+// passed) AND stderr (always, with a MCMINI_SCHEDULE_JSON: prefix).
+//
+// stderr is the transport used by the Antithesis deep_debug strategy: writes
+// to $ANTITHESIS_OUTPUT_DIR/sdk.jsonl hang mid-rollout under the fuzzing
+// campaign's snapshot machinery, but container stderr lines are always
+// captured as Guest events. Outside an Antithesis campaign the stderr line is
+// harmless; the strategy filters by the prefix.
+static void emit_schedule_record(const std::string& json) {
+  if (g_jsonl_out.is_open()) {
+    g_jsonl_out << json << "\n";
+    g_jsonl_out.flush();
+  }
+  std::cerr << "MCMINI_SCHEDULE_JSON: " << json << "\n";
+  std::cerr.flush();
+}
 // --- end JSONL seed emission -----------------------------------------------
 
 visible_object_state* translate_recorded_object_to_model(
@@ -203,11 +220,11 @@ void finished_trace_classic_dpor(const coordinator& c, const stats& stats) {
   // JSONL we want one record per trace with the correct outcome, so skip the
   // "clean" emit when the program is in deadlock — found_deadlock will emit
   // its own record with outcome="deadlock".
-  if (g_jsonl_out.is_open() &&
-      !c.get_current_program_model().is_in_deadlock()) {
-    emit_jsonl_schedule_base(g_jsonl_out, stats.trace_id, "clean", c, stats);
-    g_jsonl_out << "}}\n";
-    g_jsonl_out.flush();
+  if (!c.get_current_program_model().is_in_deadlock()) {
+    std::ostringstream buf;
+    emit_jsonl_schedule_base(buf, stats.trace_id, "clean", c, stats);
+    buf << "}}";
+    emit_schedule_record(buf.str());
   }
 }
 
@@ -216,12 +233,11 @@ void found_undefined_behavior(const coordinator& c, const stats& stats,
   std::cerr << "UNDEFINED BEHAVIOR:\n" << ub.what() << std::endl;
   print_trace_text(c, stats);
 
-  if (g_jsonl_out.is_open()) {
-    emit_jsonl_schedule_base(g_jsonl_out, stats.trace_id, "undefined_behavior",
-                             c, stats);
-    g_jsonl_out << ",\"ub_message\":\""
-                << escape_json_string(ub.what()) << "\"}}\n";
-    g_jsonl_out.flush();
+  {
+    std::ostringstream buf;
+    emit_jsonl_schedule_base(buf, stats.trace_id, "undefined_behavior", c, stats);
+    buf << ",\"ub_message\":\"" << escape_json_string(ub.what()) << "\"}}";
+    emit_schedule_record(buf.str());
   }
 }
 
@@ -258,16 +274,16 @@ void found_abnormal_termination(
   std::cout << ss.str();
   std::cout.flush();
 
-  if (g_jsonl_out.is_open()) {
-    emit_jsonl_schedule_base(g_jsonl_out, stats.trace_id, "abnormal_termination",
-                             c, stats);
-    g_jsonl_out << ",\"termination\":{"
-                << "\"signal\":" << ub.signo
-                << ",\"signal_name\":\""
-                << escape_json_string(sig_to_str.at(ub.signo)) << "\""
-                << ",\"culprit_thread\":" << ub.culprit
-                << "}}}\n";
-    g_jsonl_out.flush();
+  {
+    std::ostringstream buf;
+    emit_jsonl_schedule_base(buf, stats.trace_id, "abnormal_termination", c, stats);
+    buf << ",\"termination\":{"
+        << "\"signal\":" << ub.signo
+        << ",\"signal_name\":\""
+        << escape_json_string(sig_to_str.at(ub.signo)) << "\""
+        << ",\"culprit_thread\":" << ub.culprit
+        << "}}}";
+    emit_schedule_record(buf.str());
   }
 }
 
@@ -285,10 +301,11 @@ void found_deadlock(const coordinator& c, const stats& stats) {
   std::cout << ss.str();
   std::cout.flush();
 
-  if (g_jsonl_out.is_open()) {
-    emit_jsonl_schedule_base(g_jsonl_out, stats.trace_id, "deadlock", c, stats);
-    g_jsonl_out << "}}\n";
-    g_jsonl_out.flush();
+  {
+    std::ostringstream buf;
+    emit_jsonl_schedule_base(buf, stats.trace_id, "deadlock", c, stats);
+    buf << "}}";
+    emit_schedule_record(buf.str());
   }
 }
 
