@@ -41,6 +41,39 @@ extern __thread int mc_in_wrapper;
 // campaign, or getchar_stub/stdin standalone. Guarded below in case unresolved.
 extern int fuzz_getchar(void) __attribute__((weak));
 
+// Antithesis assertion emit channel — the same libvoidstar the C++ SDK uses
+// (antithesis_sdk.h: fuzz_json_data(json, strlen(json)); fuzz_flush()). Weak,
+// like fuzz_getchar: a standalone run without libvoidstar simply skips it.
+extern void fuzz_json_data(const char *data, size_t size) __attribute__((weak));
+extern void fuzz_flush(void) __attribute__((weak));
+
+// Fire the "deadlock is unreachable" Antithesis property over the libvoidstar
+// VMCALL so it surfaces in triage. A reachability/Unreachable assertion FAILS
+// when hit, so a hit == "the SUT reached a deadlock (a bug)". We register ON HIT
+// (only ever called with hit=1, at the deadlock site): the hit record is a
+// complete assertion, so triage surfaces the failed property exactly when a
+// deadlock is found. (A separate hit=0 catalog emit at the constructor CRASHES
+// the SUT — fuzz_json_data is not ready before the guest's first syncio; by the
+// deadlock site the scheduler has already made many fuzz_getchar calls, so the
+// VMCALL is warm.) id == message (triage keys one property per message), stable.
+static void emit_deadlock_property(int hit) {
+  if (!fuzz_json_data) return;  // no libvoidstar (standalone) — skip
+  char buf[512];
+  int n = snprintf(buf, sizeof buf,
+      "{\"antithesis_assert\":{\"hit\":%s,\"must_hit\":false,"
+      "\"assert_type\":\"reachability\",\"display_type\":\"Unreachable\","
+      "\"message\":\"deep-debug detected a deadlock\",\"condition\":false,"
+      "\"id\":\"deep-debug detected a deadlock\","
+      "\"location\":{\"class\":\"\",\"function\":\"scheduler_main\","
+      "\"file\":\"inproc_scheduler.c\",\"begin_line\":0,\"begin_column\":0},"
+      "\"details\":{}}}",
+      hit ? "true" : "false");
+  if (n > 0 && (size_t)n < sizeof buf) {
+    fuzz_json_data(buf, (size_t)n);
+    if (fuzz_flush) fuzz_flush();
+  }
+}
+
 // --- scheduler-local state (touched only by the scheduler thread) --------
 typedef enum {
   RS_NONE = 0,     // slot unused
@@ -427,6 +460,7 @@ static void *scheduler_main(void *unused) {
     if (ne == 0) {
       SDBG("[inproc_sched] no enabled runner (%d parked) -> DEADLOCK\n", live);
       build_pending();  // record the blocked ops before emitting
+      emit_deadlock_property(1);  // fire the triage property: deadlock reached
       sched_emit("deadlock");
       fflush(stderr);
       _exit(0);
