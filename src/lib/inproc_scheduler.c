@@ -140,6 +140,32 @@ static void mtab_set(void *m, int locked, runner_id_t owner) {
   g_mtab[i].owner = owner;
 }
 
+// Semaphore count table (linear; object identity = pointer value). Mirrors each
+// semaphore's count so the scheduler can decide sem_wait enabledness (enabled
+// iff count > 0) and detect sem deadlocks (all runnable threads blocked on a
+// zero-count wait). Populated from the observed SEM_INIT and each POST/WAIT.
+typedef struct { void *s; int count; } sem_state_t;
+static sem_state_t g_stab[MAX_TOTAL_THREADS_IN_PROGRAM * 4];
+static int g_stab_n = 0;
+static int stab_find(void *s) {
+  for (int i = 0; i < g_stab_n; i++)
+    if (g_stab[i].s == s) return i;
+  return -1;
+}
+static void stab_set(void *s, int count) {
+  int i = stab_find(s);
+  if (i < 0) {
+    if (g_stab_n >= (int)(sizeof g_stab / sizeof g_stab[0])) return;
+    i = g_stab_n++;
+    g_stab[i].s = s;
+  }
+  g_stab[i].count = count;
+}
+static int stab_count(void *s) {
+  int i = stab_find(s);
+  return (i < 0) ? 0 : g_stab[i].count;
+}
+
 static void hash_step(runner_id_t r, uint32_t op) {
   g_hash = (g_hash ^ (uint64_t)r) * 1099511628211ULL;
   g_hash = (g_hash ^ (uint64_t)op) * 1099511628211ULL;
@@ -165,6 +191,10 @@ static const char *op_name(uint32_t op) {
     case THREAD_CREATE_TYPE:       return "thread_create";
     case THREAD_JOIN_TYPE:         return "thread_join";
     case THREAD_EXIT_TYPE:         return "thread_exit";
+    case SEM_INIT_TYPE:            return "sem_init";
+    case SEM_WAIT_TYPE:            return "sem_wait";
+    case SEM_POST_TYPE:            return "sem_post";
+    case SEM_DESTROY_TYPE:         return "sem_destroy";
     case OP_THREAD_START_SENTINEL: return "thread_start";
     default:                       return "other";
   }
@@ -203,10 +233,19 @@ static void record_step(const runner_id_t *enabled, int ne, runner_id_t chosen,
                         uint32_t chosen_op, void *chosen_obj) {
   int rem = (int)sizeof(g_events) - g_events_len;
   if (rem < 2048) return;  // near full: stop recording (the schedule still runs)
-  int n = snprintf(g_events + g_events_len, (size_t)rem,
-                   "%s{\"step\":%lu,\"runner\":%u,\"op\":\"%s\",\"obj\":\"%p\",\"enabled\":[",
-                   g_events_len ? "," : "", g_steps, (unsigned)chosen,
-                   op_name(chosen_op), chosen_obj);
+  int n;
+  if (chosen_op == SEM_INIT_TYPE)
+    // Emit the init count so the fuzzer-side model can seed the sem's count
+    // (needed for sem_wait enabledness). g_rs[chosen].target holds it (read_op).
+    n = snprintf(g_events + g_events_len, (size_t)rem,
+                 "%s{\"step\":%lu,\"runner\":%u,\"op\":\"%s\",\"obj\":\"%p\",\"count\":%u,\"enabled\":[",
+                 g_events_len ? "," : "", g_steps, (unsigned)chosen,
+                 op_name(chosen_op), chosen_obj, (unsigned)g_rs[chosen].target);
+  else
+    n = snprintf(g_events + g_events_len, (size_t)rem,
+                 "%s{\"step\":%lu,\"runner\":%u,\"op\":\"%s\",\"obj\":\"%p\",\"enabled\":[",
+                 g_events_len ? "," : "", g_steps, (unsigned)chosen,
+                 op_name(chosen_op), chosen_obj);
   if (n < 0 || n >= rem) return;
   g_events_len += n;
   for (int i = 0; i < ne; i++) record_enabled_entry(i, enabled[i]);
@@ -312,6 +351,19 @@ static void read_op(runner_id_t r) {
     runner_id_t child = RID_INVALID;
     memcpy(&child, (const void *)mb->cnts, sizeof child);
     g_rs[r].target = child;
+  } else if (t == SEM_INIT_TYPE) {
+    // payload: sem ptr, then the unsigned init count. Stash the count in
+    // `target` (unused for sem ops) so step_runner can seed the count table.
+    void *obj = NULL;
+    unsigned cnt = 0;
+    memcpy(&obj, (const void *)mb->cnts, sizeof obj);
+    memcpy(&cnt, (const void *)(mb->cnts + sizeof obj), sizeof cnt);
+    g_rs[r].obj = obj;
+    g_rs[r].target = (runner_id_t)cnt;
+  } else if (t == SEM_WAIT_TYPE || t == SEM_POST_TYPE || t == SEM_DESTROY_TYPE) {
+    void *obj = NULL;
+    memcpy(&obj, (const void *)mb->cnts, sizeof obj);
+    g_rs[r].obj = obj;
   }
   SDBG("[inproc_sched] runner %u announced op=%u obj=%p target=%d\n",
        (unsigned)r, t, g_rs[r].obj, (int)g_rs[r].target);
@@ -327,6 +379,17 @@ static int op_enabled(runner_id_t r) {
     case MUTEX_LOCK_TYPE: {
       int i = mtab_find(g_rs[r].obj);
       return (i < 0) || !g_mtab[i].locked;  // free or not yet seen
+    }
+    case SEM_POST_TYPE:
+    case SEM_INIT_TYPE:
+    case SEM_DESTROY_TYPE:
+      return 1;
+    case SEM_WAIT_TYPE: {
+      // Enabled iff the semaphore's count > 0 (matches the model's
+      // sem_wait::will_block). An unseen sem (never init'd through the
+      // scheduler) has count 0 -> disabled.
+      int i = stab_find(g_rs[r].obj);
+      return (i >= 0) && g_stab[i].count > 0;
     }
     case THREAD_JOIN_TYPE: {
       runner_id_t tgt = g_rs[r].target;
@@ -356,6 +419,10 @@ static void step_runner(runner_id_t r) {
     case MUTEX_LOCK_TYPE:   mtab_set(g_rs[r].obj, 1, r); break;
     case MUTEX_UNLOCK_TYPE: mtab_set(g_rs[r].obj, 0, RID_INVALID); break;
     case MUTEX_INIT_TYPE:   mtab_set(g_rs[r].obj, 0, RID_INVALID); break;
+    case SEM_INIT_TYPE:     stab_set(g_rs[r].obj, (int)g_rs[r].target); break;  // target = init count
+    case SEM_POST_TYPE:     stab_set(g_rs[r].obj, stab_count(g_rs[r].obj) + 1); break;
+    case SEM_WAIT_TYPE:     stab_set(g_rs[r].obj, stab_count(g_rs[r].obj) - 1); break;
+    case SEM_DESTROY_TYPE:  break;
     case THREAD_CREATE_TYPE: {
       // The create has now executed -> the child may start (become schedulable).
       runner_id_t child = g_rs[r].target;

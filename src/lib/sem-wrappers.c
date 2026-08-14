@@ -5,6 +5,10 @@
 
 #include "mcmini/mcmini.h"
 
+// The wrappers' "already inside a wrapper" flag (defined in json_events.c). Set
+// during the FUZZER_STANDALONE mailbox handshake, mirroring the mutex wrappers.
+extern __thread int mc_in_wrapper;
+
 int mc_sem_init(sem_t *sem, int p, unsigned count) {
   // TODO: Does not handle interprocess semaphores
   MEASURE_FUNCTION_TIME
@@ -15,8 +19,20 @@ int mc_sem_init(sem_t *sem, int p, unsigned count) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
     case CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_sem_init(sem, p, count);
+    case FUZZER_STANDALONE: {
+      // Row 15: announce SEM_INIT (sem ptr + count), park; the scheduler records
+      // the count and releases us to perform the real init. Mirrors the mutex
+      // FUZZER_STANDALONE path.
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = SEM_INIT_TYPE;
+      memcpy_v(mb->cnts, &sem, sizeof(sem));
+      memcpy_v(mb->cnts + sizeof(sem), &count, sizeof(count));
+      thread_wake_scheduler_and_wait();
+      int rc = libpthread_sem_init(sem, p, count);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT:  {
@@ -76,8 +92,16 @@ int mc_sem_destroy(sem_t *sem) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
     case CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_sem_destroy(sem);
+    case FUZZER_STANDALONE: {
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = SEM_DESTROY_TYPE;
+      memcpy_v(mb->cnts, &sem, sizeof(sem));
+      thread_wake_scheduler_and_wait();
+      int rc = libpthread_sem_destroy(sem);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -138,8 +162,16 @@ mc_sem_post(sem_t *sem) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
     case CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_sem_post(sem);
+    case FUZZER_STANDALONE: {
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = SEM_POST_TYPE;
+      memcpy_v(mb->cnts, &sem, sizeof(sem));
+      thread_wake_scheduler_and_wait();
+      int rc = libpthread_sem_post(sem);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -198,8 +230,18 @@ int mc_sem_wait(sem_t *sem) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
     case CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_sem_wait(sem);
+    case FUZZER_STANDALONE: {
+      // The scheduler only releases us when the sem count > 0, so the real
+      // wait below never blocks.
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = SEM_WAIT_TYPE;
+      memcpy_v(mb->cnts, &sem, sizeof(sem));
+      thread_wake_scheduler_and_wait();
+      int rc = libpthread_sem_wait(sem);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT:  {
@@ -259,7 +301,7 @@ int mc_sem_wait(sem_t *sem) {
       mb->type = SEM_WAIT_TYPE;
       memcpy_v(mb->cnts, &sem, sizeof(sem));
       is_in_restart_mode() ? thread_handle_after_dmtcp_restart() : thread_wake_scheduler_and_wait();
-      return libpthread_sem_post(sem);
+      return libpthread_sem_wait(sem);
     }
     default: {
       // Wrapper functions should not be executing
