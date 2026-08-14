@@ -1050,11 +1050,23 @@ unsigned mc_sleep(unsigned duration) {
 
 int mc_pthread_cond_init(pthread_cond_t *cond,
                          const pthread_condattr_t *attr) {
+  // Infrastructure threads (scheduler, checkpoint, libvoidstar-internal) run
+  // with mc_in_wrapper=1 and never register a runner id; pass their cond ops
+  // straight through, else thread_get_mailbox asserts tid_self!=RID_INVALID.
+  if (mc_in_wrapper) return libpthread_cond_init(cond, attr);
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_cond_init(cond, attr);
+    case FUZZER_STANDALONE: {
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = COND_INIT_TYPE;
+      memcpy_v(mb->cnts, &cond, sizeof(cond));
+      thread_wake_scheduler_and_wait();
+      int rc = libpthread_cond_init(cond, attr);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -1102,11 +1114,30 @@ int mc_pthread_cond_init(pthread_cond_t *cond,
 }
 
 int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
+  if (mc_in_wrapper) return libpthread_cond_wait(cond, mutex);
   switch (get_current_mode()){
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_cond_wait(cond, mutex);
+    case FUZZER_STANDALONE: {
+      // Two-transition protocol (mirrors TARGET_BRANCH): ENQUEUE registers the
+      // waiter and releases the mutex; WAIT blocks (in the mailbox) until the
+      // scheduler releases it (i.e. a signal/broadcast woke it), then re-acquires
+      // the mutex. No real libpthread_cond_wait — the mailbox park replaces it.
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = COND_ENQUEUE_TYPE;
+      memcpy_v(mb->cnts, &cond, sizeof(cond));
+      memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
+      thread_wake_scheduler_and_wait();
+      libpthread_mutex_unlock(mutex);
+      mb->type = COND_WAIT_TYPE;
+      memcpy_v(mb->cnts, &cond, sizeof(cond));
+      memcpy_v(mb->cnts + sizeof(cond), &mutex, sizeof(mutex));
+      thread_wake_scheduler_and_wait();
+      libpthread_mutex_lock(mutex);
+      mc_in_wrapper = 0;
+      return 0;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -1260,11 +1291,20 @@ int mc_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
 }
 
 int mc_pthread_cond_signal(pthread_cond_t *cond) {
+  if (mc_in_wrapper) return libpthread_cond_signal(cond);
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_cond_signal(cond);
+    case FUZZER_STANDALONE: {
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = COND_SIGNAL_TYPE;
+      memcpy_v(mb->cnts, &cond, sizeof(cond));
+      thread_wake_scheduler_and_wait();
+      int rc = libpthread_cond_signal(cond);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -1361,11 +1401,20 @@ int mc_pthread_cond_signal(pthread_cond_t *cond) {
 }
 
 int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
+  if (mc_in_wrapper) return libpthread_cond_broadcast(cond);
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_cond_broadcast(cond);
+    case FUZZER_STANDALONE: {
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = COND_BROADCAST_TYPE;
+      memcpy_v(mb->cnts, &cond, sizeof(cond));
+      thread_wake_scheduler_and_wait();
+      int rc = libpthread_cond_broadcast(cond);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {
@@ -1424,11 +1473,20 @@ int mc_pthread_cond_broadcast(pthread_cond_t *cond) {
 }
 
 int mc_pthread_cond_destroy(pthread_cond_t *cond) {
+  if (mc_in_wrapper) return libpthread_cond_destroy(cond);
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case FUZZER_STANDALONE: {
       return libpthread_cond_destroy(cond);
+    case FUZZER_STANDALONE: {
+      mc_in_wrapper = 1;
+      volatile runner_mailbox *mb = thread_get_mailbox();
+      mb->type = COND_DESTROY_TYPE;
+      memcpy_v(mb->cnts, &cond, sizeof(cond));
+      thread_wake_scheduler_and_wait();
+      int rc = libpthread_cond_destroy(cond);
+      mc_in_wrapper = 0;
+      return rc;
     }
     case RECORD:
     case PRE_CHECKPOINT: {

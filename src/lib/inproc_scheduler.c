@@ -86,8 +86,10 @@ typedef enum {
 typedef struct {
   rstatus_t status;
   uint32_t op;         // pending op type (transitions.h) when RS_PARKED
-  void *obj;           // mutex ptr for MUTEX_* ops
-  runner_id_t target;  // target runner for THREAD_JOIN
+  void *obj;           // mutex ptr for MUTEX_*; sem ptr for SEM_*; cond ptr for COND_*
+  runner_id_t target;  // target runner for THREAD_JOIN; init count for SEM_INIT
+  void *cond_mutex;    // associated mutex for COND_ENQUEUE / COND_WAIT
+  int cond_woken;      // 1 once a signal/broadcast wakes this enqueued cv waiter
 } runner_state_t;
 
 static runner_state_t g_rs[MAX_TOTAL_THREADS_IN_PROGRAM];
@@ -195,6 +197,12 @@ static const char *op_name(uint32_t op) {
     case SEM_WAIT_TYPE:            return "sem_wait";
     case SEM_POST_TYPE:            return "sem_post";
     case SEM_DESTROY_TYPE:         return "sem_destroy";
+    case COND_ENQUEUE_TYPE:        return "cond_enqueue";
+    case COND_WAIT_TYPE:           return "cond_wait";
+    case COND_SIGNAL_TYPE:         return "cond_signal";
+    case COND_BROADCAST_TYPE:      return "cond_broadcast";
+    case COND_INIT_TYPE:           return "cond_init";
+    case COND_DESTROY_TYPE:        return "cond_destroy";
     case OP_THREAD_START_SENTINEL: return "thread_start";
     default:                       return "other";
   }
@@ -364,6 +372,18 @@ static void read_op(runner_id_t r) {
     void *obj = NULL;
     memcpy(&obj, (const void *)mb->cnts, sizeof obj);
     g_rs[r].obj = obj;
+  } else if (t == COND_ENQUEUE_TYPE || t == COND_WAIT_TYPE) {
+    // payload: cond ptr, then the associated mutex ptr.
+    void *cobj = NULL, *cmx = NULL;
+    memcpy(&cobj, (const void *)mb->cnts, sizeof cobj);
+    memcpy(&cmx, (const void *)(mb->cnts + sizeof cobj), sizeof cmx);
+    g_rs[r].obj = cobj;
+    g_rs[r].cond_mutex = cmx;
+  } else if (t == COND_SIGNAL_TYPE || t == COND_BROADCAST_TYPE ||
+             t == COND_INIT_TYPE || t == COND_DESTROY_TYPE) {
+    void *cobj = NULL;
+    memcpy(&cobj, (const void *)mb->cnts, sizeof cobj);
+    g_rs[r].obj = cobj;
   }
   SDBG("[inproc_sched] runner %u announced op=%u obj=%p target=%d\n",
        (unsigned)r, t, g_rs[r].obj, (int)g_rs[r].target);
@@ -390,6 +410,21 @@ static int op_enabled(runner_id_t r) {
       // scheduler) has count 0 -> disabled.
       int i = stab_find(g_rs[r].obj);
       return (i >= 0) && g_stab[i].count > 0;
+    }
+    case COND_ENQUEUE_TYPE:
+    case COND_SIGNAL_TYPE:
+    case COND_BROADCAST_TYPE:
+    case COND_INIT_TYPE:
+    case COND_DESTROY_TYPE:
+      return 1;
+    case COND_WAIT_TYPE: {
+      // Enabled only once a signal/broadcast has woken this enqueued waiter AND
+      // the associated mutex is free to re-acquire. A never-woken waiter is
+      // disabled -> if all runnable threads are so blocked, that's the deadlock
+      // (e.g. a lost wakeup: signal fired before the waiter enqueued).
+      if (!g_rs[r].cond_woken) return 0;
+      int i = mtab_find(g_rs[r].cond_mutex);
+      return (i < 0) || !g_mtab[i].locked;
     }
     case THREAD_JOIN_TYPE: {
       runner_id_t tgt = g_rs[r].target;
@@ -423,6 +458,34 @@ static void step_runner(runner_id_t r) {
     case SEM_POST_TYPE:     stab_set(g_rs[r].obj, stab_count(g_rs[r].obj) + 1); break;
     case SEM_WAIT_TYPE:     stab_set(g_rs[r].obj, stab_count(g_rs[r].obj) - 1); break;
     case SEM_DESTROY_TYPE:  break;
+    case COND_ENQUEUE_TYPE:
+      mtab_set(g_rs[r].cond_mutex, 0, RID_INVALID);  // release the mutex
+      g_rs[r].cond_woken = 0;                         // enqueued, not yet woken
+      break;
+    case COND_WAIT_TYPE:
+      mtab_set(g_rs[r].cond_mutex, 1, r);             // re-acquire the mutex
+      break;
+    case COND_SIGNAL_TYPE:
+      // Wake ONE enqueued waiter on this cond (parked on COND_WAIT, same cond,
+      // not yet woken); the signal is lost if none are enqueued.
+      for (runner_id_t w = 0; w <= g_max_rid; w++) {
+        if (g_rs[w].status == RS_PARKED && g_rs[w].op == COND_WAIT_TYPE &&
+            g_rs[w].obj == g_rs[r].obj && !g_rs[w].cond_woken) {
+          g_rs[w].cond_woken = 1;
+          break;
+        }
+      }
+      break;
+    case COND_BROADCAST_TYPE:
+      for (runner_id_t w = 0; w <= g_max_rid; w++) {
+        if (g_rs[w].status == RS_PARKED && g_rs[w].op == COND_WAIT_TYPE &&
+            g_rs[w].obj == g_rs[r].obj && !g_rs[w].cond_woken)
+          g_rs[w].cond_woken = 1;
+      }
+      break;
+    case COND_INIT_TYPE:
+    case COND_DESTROY_TYPE:
+      break;
     case THREAD_CREATE_TYPE: {
       // The create has now executed -> the child may start (become schedulable).
       runner_id_t child = g_rs[r].target;
