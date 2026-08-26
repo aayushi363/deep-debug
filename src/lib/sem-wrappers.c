@@ -33,16 +33,13 @@ int mc_sem_init(sem_t *sem, int p, unsigned count) {
       int rc = libpthread_sem_init(sem, p, count);
       RESUME_TIMER
       if (rc == 0) {
-        //libpthread_mutex_lock(&rec_list_lock);
-        libpthread_mutex_lock(&sem_record->node_lock);
-        rec_list *sem_record = find_object_record_mode(sem);
-        assert(sem_record != NULL);
+        node_spin_lock(&sem_record->node_spin);
         visible_object vo = {.type = SEMAPHORE,
                              .location = sem,
                              .sem_state.status = SEM_INITIALIZED,
                              .sem_state.count = count};
         sem_record->vo = vo;
-        libpthread_mutex_unlock(&sem_record->node_lock);
+        node_spin_unlock(&sem_record->node_spin);
       }
       return rc;
     }
@@ -93,16 +90,12 @@ int mc_sem_destroy(sem_t *sem) {
       int rc = libpthread_sem_destroy(sem);
       RESUME_TIMER
       if (rc == 0) {
-        //libpthread_mutex_lock(&rec_list_lock);
-        libpthread_mutex_lock(&sem_record->node_lock);
-        rec_list *sem_record = find_object_record_mode(sem);
-        assert(sem_record != NULL);
+        node_spin_lock(&sem_record->node_spin);
         visible_object vo = {.type = SEMAPHORE,
                              .location = sem,
                              .sem_state.status = SEM_DESTROYED};
         sem_record->vo = vo;
-        //libpthread_mutex_unlock(&rec_list_lock);
-        libpthread_mutex_unlock(&sem_record->node_lock);
+        node_spin_unlock(&sem_record->node_spin);
       }
       return rc;
     }
@@ -159,11 +152,7 @@ mc_sem_post(sem_t *sem) {
       int rc = libpthread_sem_post(sem);
       RESUME_TIMER
       if (rc == 0) {  // Post succeeded
-        //libpthread_mutex_lock(&rec_list_lock);
-        libpthread_mutex_lock(&sem_record->node_lock);
-        sem_record->vo.sem_state.count++;
-        //libpthread_mutex_unlock(&rec_list_lock);
-        libpthread_mutex_unlock(&sem_record->node_lock);
+        __atomic_fetch_add(&sem_record->vo.sem_state.count, 1, __ATOMIC_RELAXED);
       }
       return rc;
     }
@@ -220,11 +209,7 @@ int mc_sem_wait(sem_t *sem) {
         int rc = libpthread_sem_timedwait(sem, &ts);
         RESUME_TIMER
         if (rc == 0) {  // Wait succeeded
-          //libpthread_mutex_lock(&rec_list_lock);
-          libpthread_mutex_lock(&sem_record->node_lock);
-          sem_record->vo.sem_state.count--;
-          //libpthread_mutex_unlock(&rec_list_lock);
-          libpthread_mutex_unlock(&sem_record->node_lock);
+          __atomic_fetch_sub(&sem_record->vo.sem_state.count, 1, __ATOMIC_RELAXED);
           return rc;
         } else if (rc == ETIMEDOUT) {  // If the lock failed.
           // Here, the user-space thread did not manage to wait on the

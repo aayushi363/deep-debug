@@ -52,6 +52,19 @@ static inline long raw_close(int fd) {
     return ret;
 }
 
+/* DMTCP wraps the glibc syscall() function via LD_PRELOAD, so
+ * syscall(SYS_exit_group, ...) can be intercepted and suppressed.
+ * Use the same inline-asm pattern as raw_write/raw_close to bypass it. */
+static inline __attribute__((noreturn)) void raw_exit_group(int code) {
+    register long rax __asm__("rax") = SYS_exit_group;
+    register long rdi __asm__("rdi") = (long)code;
+    __asm__ volatile ("syscall"
+                      : "+a" (rax)
+                      : "r" (rdi)
+                      : "rcx", "r11", "memory");
+    __builtin_unreachable();
+}
+
 /* Global list head kept in this TU only. */
 static ATOMIC(ThreadDataNode*) g_all_threads_list_head = ATOMIC_VAR_INIT(NULL);
 static const char* g_report_filepath = "/tmp/timing_report.txt";
@@ -84,6 +97,13 @@ static void final_report_and_exit(int signum) {
     g_signal_received = signum;
     const char msg[] = "[TIMER INFO] Signal received, scheduling report save\n";
     write(STDERR_FILENO, msg, sizeof(msg)-1);
+    /* For user-initiated signals (Ctrl+C, kill), exit immediately.
+     * Saving the report can take tens of seconds when there are millions of
+     * per-call timing records. For crash signals (SIGSEGV, SIGABRT) we still
+     * fall through to let the watcher thread save before exiting. */
+    if (signum == SIGINT || signum == SIGTERM) {
+        raw_exit_group(128 + signum);
+    }
 }
 
 void timer_init(const char* report_filepath) {
@@ -157,7 +177,10 @@ static void *timing_report_watcher(void *arg) {
     while (1) {
         if (g_signal_received) {
             save_timing_report(NULL);
-            _exit(128 + (int)g_signal_received);
+            /* raw_exit_group bypasses DMTCP's LD_PRELOAD wrapper around the
+             * glibc syscall() function, which suppresses SYS_exit_group to
+             * prevent uncoordinated teardown from inside the child. */
+            raw_exit_group(128 + (int)g_signal_received);
         }
         nanosleep(&sleep_ts, NULL);
     }
@@ -174,6 +197,14 @@ void record_time(TimerInfo* info) {
                              (end_time.tv_nsec - info->start_time.tv_nsec);
     }
     if (final_duration_ns == 0 && info->total_paused_ns == 0) return;
+
+    /* Cap per-thread records so DMTCP checkpoint size stays bounded.
+     * Without this cap, O(N log N) mutex calls (e.g. Barnes with 512K
+     * particles) accumulate gigabytes of linked-list nodes that DMTCP
+     * must snapshot on every checkpoint interval. */
+    static __thread size_t thread_record_count = 0;
+    if (thread_record_count >= 100000) return;
+    thread_record_count++;
 
     if (!thread_registered) {
         ThreadDataNode* new_thread_node = (ThreadDataNode*)malloc(sizeof(ThreadDataNode));

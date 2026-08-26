@@ -35,6 +35,8 @@ public:
     coenabled_relation_type coenabled_relation =
         classic_dpor::default_coenabledness();
     uint32_t maximum_total_execution_depth = 1500;
+    // Maximum transitions any single thread may execute per trace. 0 = unlimited.
+    uint32_t max_thread_execution_depth = 0;
     bool assumes_linear_program_flow = false;
 
     enum class exploration_policy : uint { round_robin, smallest_first };

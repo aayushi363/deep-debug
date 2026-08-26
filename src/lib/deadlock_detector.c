@@ -13,7 +13,79 @@
 #include <unistd.h>
 #include <pthread.h>
 
-// Thresholds and counters
+/* ── blocked-thread-cycle detection ─────────────────────────────────────
+ *
+ * Two atomic counters track thread state in RECORD mode:
+ *
+ *   g_active_threads  – threads that have registered and not yet exited
+ *   g_blocked_threads – threads currently inside a blocking-wait slow path
+ *                       (e.g. contended mutex_lock timedlock loop)
+ *
+ * When g_blocked_threads reaches g_active_threads every live thread is
+ * waiting for a resource held by another waiting thread — a deadlock.
+ * Detection is O(1) per operation: one atomic increment + one load.
+ */
+static atomic_int g_active_threads  = ATOMIC_VAR_INIT(0);
+static atomic_int g_blocked_threads = ATOMIC_VAR_INIT(0);
+
+void dd_thread_start(void) {
+    atomic_fetch_add(&g_active_threads, 1);
+}
+
+void dd_thread_exit(void) {
+    atomic_fetch_sub(&g_active_threads, 1);
+}
+
+void dd_enter_block(void) {
+    atomic_fetch_add(&g_blocked_threads, 1);
+    /* Deadlock check is intentionally NOT done here to avoid false positives
+     * from transient contention: multiple threads can transiently all wait for
+     * the same uncontended mutex (one is releasing it) without a cycle existing.
+     * The check is deferred to dd_check_deadlock(), called from the timedlock
+     * retry loop after 1 second of sustained blocking. */
+}
+
+void dd_exit_block(void) {
+    atomic_fetch_sub(&g_blocked_threads, 1);
+}
+
+/* Called from the timedlock retry loop after sustained waiting.
+ * Aborts only when all active threads remain simultaneously blocked after
+ * a 100 ms confirmation window.  The extra sleep closes a false-positive race:
+ * a holder that releases its mutex and immediately calls dd_thread_exit() drops
+ * g_active before the waiting threads (still mid-sleep inside timedlock) can
+ * decrement g_blocked.  Within 100 ms (> one 50 ms timedlock interval) any
+ * waiter that was unblocked by the release will have acquired the mutex and
+ * called dd_exit_block().  A genuine deadlock cycle never resolves. */
+void dd_check_deadlock(void) {
+    int blocked = atomic_load(&g_blocked_threads);
+    int active  = atomic_load(&g_active_threads);
+    if (active > 0 && blocked >= active) {
+        struct timespec confirm_ts = {0, 100000000L}; /* 100 ms */
+        nanosleep(&confirm_ts, NULL);
+        blocked = atomic_load(&g_blocked_threads);
+        active  = atomic_load(&g_active_threads);
+        if (active > 0 && blocked >= active) {
+            const char msg[] = "Deadlock detected: all threads blocked\n";
+            write(STDERR_FILENO, msg, sizeof(msg) - 1);
+            _exit(1);
+        }
+    }
+}
+
+/* ── CPU-idle liveness sampler ───────────────────────────────────────────
+ *
+ * Catches liveness violations that are not mutex cycles: e.g. a thread
+ * sleeping forever in cond_timedwait because the signal was never sent.
+ * When total process CPU usage drops below PROGRESS_NSEC for
+ * QUIET_THRESHOLD consecutive 10 ms samples (~1 second) we assume the
+ * program is permanently stuck and abort.
+ *
+ * This sampler runs every 10 ms, so its single CLOCK_PROCESS_CPUTIME_ID
+ * syscall per interval (100 calls/s) is negligible compared to the
+ * millions of per-mutex-operation calls that the old
+ * deadlock_detector_increment_progress() used to make.
+ */
 static struct timespec prev_cpu_time = {0, 0};
 static atomic_int quiet_intervals = 0;
 // Number of consecutive low-CPU intervals before we declare deadlock
@@ -27,39 +99,18 @@ static const long PROGRESS_NSEC = 5000000; // 5 ms
 static const long PROG_NO_ADVANCE_SAMPLES = 200; /* ~5s */
 /* If CPU-time advanced by more than this while no progress, treat as livelock */
 static const unsigned long CPU_BUSY_THRESHOLD_NS = 50000000UL; /* 50 ms */
-// Occasional tick counter for debug printing
-static atomic_long tick_count = 0;
-// Progress counter: wrappers may still increment this (kept for compatibility),
-// but detection is now CPU-time based.
-static atomic_ulong progress_counter = 0;
+static atomic_long tick_count     = ATOMIC_VAR_INIT(0);
+static atomic_ulong progress_counter = ATOMIC_VAR_INIT(0);
 
-/* Track last visible progress (updated in deadlock_detector_increment_progress)
- * We store the sampler tick at which progress last occurred and the
- * process CPU-time (in ns) at that moment. The sampler uses these to
- * detect livelock: long absence of visible progress while CPU-time
- * continues to advance.
- */
-static atomic_long last_progress_tick = ATOMIC_VAR_INIT(0);
-static atomic_ulong last_progress_cpu_ns = ATOMIC_VAR_INIT(0);
-
-/* Monitor thread removed: we keep detection logic in the sampler thread
- * only to avoid creating extra threads that would be recorded in Phase I.
- */
-
-/* Sampler thread: periodically (every 10ms real time) sample
- * CLOCK_PROCESS_CPUTIME_ID to measure process CPU-time progress.
- * This avoids using ITIMER_REAL/SIGALRM which other libraries may
- * clear (via alarm(0)).
- */
 static pthread_t sampler_thread;
 static atomic_bool sampler_running = ATOMIC_VAR_INIT(false);
 
 static void *deadlock_detector_sampler_thread(void *arg) {
-  struct timespec sleep_ts = {0, 10000000L}; /* 10ms */
+  struct timespec sleep_ts = {0, 10000000L}; /* 10 ms */
   while (atomic_load(&sampler_running)) {
     struct timespec current_cpu_time;
-    if (syscall(SYS_clock_gettime, CLOCK_PROCESS_CPUTIME_ID, &current_cpu_time) == -1) {
-      /* If sampling fails, just sleep and retry. */
+    if (syscall(SYS_clock_gettime, CLOCK_PROCESS_CPUTIME_ID,
+                &current_cpu_time) == -1) {
       nanosleep(&sleep_ts, NULL);
       continue;
     }
@@ -70,49 +121,19 @@ static void *deadlock_detector_sampler_thread(void *arg) {
       continue;
     }
 
-    long diff_sec = current_cpu_time.tv_sec - prev_cpu_time.tv_sec;
-    long diff_nsec = current_cpu_time.tv_nsec - prev_cpu_time.tv_nsec;
-    if (diff_nsec < 0) {
-      diff_nsec += 1000000000L;
-      diff_sec--;
-    }
-    long total_nsec = diff_sec * 1000000000L + diff_nsec;
+    long diff_nsec = (current_cpu_time.tv_sec - prev_cpu_time.tv_sec)
+                         * 1000000000L
+                     + (current_cpu_time.tv_nsec - prev_cpu_time.tv_nsec);
 
-    long t = atomic_fetch_add(&tick_count, 1) + 1;
-    /* No periodic debug output (keep output minimal). */
+    atomic_fetch_add(&tick_count, 1);
 
-    if (total_nsec < PROGRESS_NSEC) {
-      int q = atomic_fetch_add(&quiet_intervals, 1) + 1;
-      if (q >= QUIET_THRESHOLD) {
-        /* Attempt to save timing report directly from the sampler thread.
-         * The sampler thread is created with the real pthread_create via
-         * libpthread_pthread_create, so it won't be recorded by mc_pthread_create
-         * and it's safe to call the non-async-safe save routine here.
-         */
+    if (diff_nsec < PROGRESS_NSEC) {
+      if (atomic_fetch_add(&quiet_intervals, 1) + 1 >= QUIET_THRESHOLD) {
         save_timing_report(NULL);
         _exit(1);
       }
     } else {
       atomic_store(&quiet_intervals, 0);
-    }
-
-    /* Livelock detection: if we've had no visible progress for a long time
-     * (measured in samples) while process CPU-time has advanced by a
-     * significant amount, treat this as a livelock and abort. */
-    {
-      long last_prog_tick = atomic_load(&last_progress_tick);
-      long samples_since_prog = (t > last_prog_tick) ? (t - last_prog_tick) : 0;
-      if (samples_since_prog >= PROG_NO_ADVANCE_SAMPLES) {
-        unsigned long curr_cpu_ns = (unsigned long)current_cpu_time.tv_sec * 1000000000UL +
-                                   (unsigned long)current_cpu_time.tv_nsec;
-        unsigned long last_cpu_ns = atomic_load(&last_progress_cpu_ns);
-        unsigned long cpu_advance = (curr_cpu_ns > last_cpu_ns) ? (curr_cpu_ns - last_cpu_ns) : 0UL;
-        if (cpu_advance >= CPU_BUSY_THRESHOLD_NS) {
-          /* Save timing report directly from the sampler thread, then exit. */
-          save_timing_report(NULL);
-          _exit(1);
-        }
-      }
     }
 
     prev_cpu_time = current_cpu_time;
@@ -152,13 +173,9 @@ void mc_install_deadlock_detector(bool enable) {
 
 
 void deadlock_detector_increment_progress(void) {
-  atomic_fetch_add(&progress_counter, 1);
-  /* Record the tick and current process-CPU time for livelock detection. */
-  long cur_tick = atomic_load(&tick_count);
-  atomic_store(&last_progress_tick, cur_tick);
-  struct timespec now;
-  if (syscall(SYS_clock_gettime, CLOCK_PROCESS_CPUTIME_ID, &now) == 0) {
-    unsigned long ns = (unsigned long)now.tv_sec * 1000000000UL + (unsigned long)now.tv_nsec;
-    atomic_store(&last_progress_cpu_ns, ns);
-  }
+    /* Kept for API compatibility (barrier, cond, join wrappers still call it).
+     * The old CLOCK_PROCESS_CPUTIME_ID syscall has been removed — at 24M
+     * calls/timestep for large N it was the dominant recording overhead.
+     * The CPU-idle sampler above handles liveness detection on its own. */
+    atomic_fetch_add(&progress_counter, 1);
 }

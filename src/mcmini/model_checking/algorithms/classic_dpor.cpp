@@ -12,6 +12,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -144,7 +145,22 @@ void classic_dpor::verify_using(coordinator &coordinator,
   /// for state `s_0`.
   log_debug(dpor_logger) << "Initializing the DPOR stack";
   bool reached_max_depth = false;
+  bool reached_per_thread_depth = false;
   std::list<runner_id_t> round_robin_sched;
+
+  // Per-thread transition counter for the current trace.
+  // Incremented when a runner executes a transition, decremented when the
+  // transition is undone during backtracking.
+  std::unordered_map<runner_id_t, size_t> thread_step_counts;
+  const uint32_t per_thread_limit = this->config.max_thread_execution_depth;
+
+  // Returns true if runner `r` has not yet reached the per-thread limit.
+  // Always true when per_thread_limit == 0 (unlimited).
+  auto within_thread_limit = [&](runner_id_t r) -> bool {
+    if (per_thread_limit == 0) return true;
+    auto it = thread_step_counts.find(r);
+    return it == thread_step_counts.end() || it->second < per_thread_limit;
+  };
 
   stats model_checking_stats;
   dpor_context context(coordinator);
@@ -167,23 +183,48 @@ void classic_dpor::verify_using(coordinator &coordinator,
         if (!reached_max_depth) {
           log_unexpected(dpor_logger)
               << "*** Execution Limit Reached! ***\n\n"
-              << "McMini encountered a trace with" << dpor_stack.size()
-              << " transitions which is the most that McMini was configured"
+              << "McMini encountered a trace with " << dpor_stack.size()
+              << " transitions, which is the most McMini was configured"
               << " to handle in any given trace ("
               << this->config.maximum_total_execution_depth
-              << "). McMini will continue its search, but it may be "
-                 "incomplete. Rerun McMini with the "
-                 "\"--max-depth-per-thread\" "
-              << "flag for correct results.";
+              << "). McMini will continue its search, but results may be "
+                 "incomplete. Consider increasing \"--max-depth-per-trace\".";
           reached_max_depth = true;
         }
         break;
+      }
+
+      // Per-thread depth limit: if every enabled runner has already executed
+      // per_thread_limit transitions in this trace, stop expanding.
+      if (per_thread_limit > 0) {
+        bool any_schedulable = false;
+        for (runner_id_t r : dpor_stack.back().get_enabled_runners()) {
+          if (within_thread_limit(r)) { any_schedulable = true; break; }
+        }
+        if (!any_schedulable) {
+          if (!reached_per_thread_depth) {
+            log_unexpected(dpor_logger)
+                << "*** Per-Thread Execution Limit Reached! ***\n\n"
+                << "All enabled threads have reached the per-thread limit of "
+                << per_thread_limit
+                << " transitions. McMini will continue searching other traces,"
+                   " but results for this trace may be incomplete. Consider"
+                   " increasing \"--max-depth-per-thread\".";
+            reached_per_thread_depth = true;
+          }
+          break;
+        }
       }
       try {
         runner_id_t rid;
         switch (config.policy) {
         case configuration::exploration_policy::smallest_first: {
           rid = dpor_stack.back().get_first_enabled_runner();
+          if (per_thread_limit > 0) {
+            for (runner_id_t r : dpor_stack.back().get_enabled_runners()) {
+              if (within_thread_limit(r)) { rid = r; break; }
+            }
+          }
           break;
         }
         case configuration::exploration_policy::round_robin: {
@@ -204,6 +245,16 @@ void classic_dpor::verify_using(coordinator &coordinator,
           for (const runner_id_t id : round_robin_sched) {
             unscheduled_runners.erase(id);
           }
+          // Remove depth-exceeded runners from the candidate set.
+          if (per_thread_limit > 0) {
+            for (auto it = unscheduled_runners.begin();
+                 it != unscheduled_runners.end();) {
+              if (!within_thread_limit(*it))
+                it = unscheduled_runners.erase(it);
+              else
+                ++it;
+            }
+          }
           if (!unscheduled_runners.empty()) {
             rid = *std::min_element(unscheduled_runners.begin(),
                                     unscheduled_runners.end());
@@ -212,7 +263,8 @@ void classic_dpor::verify_using(coordinator &coordinator,
             auto it =
                 std::find_if(round_robin_sched.begin(), round_robin_sched.end(),
                              [&](const runner_id_t id) {
-                               return dpor_stack.back().is_enabled(id);
+                               return dpor_stack.back().is_enabled(id) &&
+                                      within_thread_limit(id);
                              });
             assert(it != round_robin_sched.end());
             round_robin_sched.splice(round_robin_sched.end(), round_robin_sched,
@@ -223,6 +275,7 @@ void classic_dpor::verify_using(coordinator &coordinator,
         }
 
         this->continue_dpor_by_expanding_trace_with(rid, context);
+        thread_step_counts[rid]++;
         model_checking_stats.total_transitions++;
 
         // Now ask the question: will the next operation of this thread
@@ -273,8 +326,15 @@ void classic_dpor::verify_using(coordinator &coordinator,
       callbacks.deadlock(coordinator, model_checking_stats);
 
     // 3. Backtrack phase
-    while (!dpor_stack.empty() && dpor_stack.back().backtrack_set_empty())
+    while (!dpor_stack.empty() && dpor_stack.back().backtrack_set_empty()) {
+      // Undo the transition that led OUT of this state.
+      if (per_thread_limit > 0) {
+        const transition *t = dpor_stack.back().get_out_transition();
+        if (t != nullptr)
+          thread_step_counts[t->get_executor()]--;
+      }
       dpor_stack.pop_back();
+    }
 
     if (!dpor_stack.empty()) {
       // At this point, the model checker's data structures are valid for
@@ -307,8 +367,18 @@ void classic_dpor::verify_using(coordinator &coordinator,
       // one of the backtrack threads. Select one thread to backtrack upon and
       // follow it before continuing onto the exploration phase.
       try {
-        this->continue_dpor_by_expanding_trace_with(
-            dpor_stack.back().backtrack_set_pop_first(), context);
+        // grow_stack_after_running will overwrite the out-transition of the
+        // current stack top with the new backtrack runner's transition. If the
+        // top already has an out-transition from a prior exploration of this
+        // same state, undo its contribution to the count first.
+        if (per_thread_limit > 0) {
+          const transition *prev_t = dpor_stack.back().get_out_transition();
+          if (prev_t != nullptr)
+            thread_step_counts[prev_t->get_executor()]--;
+        }
+        runner_id_t bt_rid = dpor_stack.back().backtrack_set_pop_first();
+        this->continue_dpor_by_expanding_trace_with(bt_rid, context);
+        thread_step_counts[bt_rid]++;
 
         // If we're doing round robin scheduling for expanding the trace,
         // backtracking forces a restart of the round robin process.

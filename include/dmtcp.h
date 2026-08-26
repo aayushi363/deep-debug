@@ -711,3 +711,4 @@ typedef void (*dmtcp_fnptr_t)(void);
 } // extern "C" {
 #endif // ifdef __cplusplus
 #endif // ifndef DMTCP_H
+

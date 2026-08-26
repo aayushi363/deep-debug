@@ -172,10 +172,16 @@ static void saveThreadStateBeforeFork(struct threadinfo* threadInfo) {
   threadInfo->pthread_descriptor = pthread_self();
   getTLSPointer(threadInfo);
 
-  // No manual signal-mask save/restore needed: getcontext()/setcontext()
-  // already save/restore the blocked-signal set via ucontext_t's uc_sigmask,
-  // even when setcontext() resumes on a brand-new clone()'d OS thread (see
-  // child_setcontext_fast() below).
+  // Save this thread's genuine per-thread sigmask so we can restore it in the
+  // forked child (rather than aborting when it is non-empty). We are inside the
+  // SIG_MULTITHREADED_FORK handler, so that signal is currently blocked in the
+  // captured mask; drop it so we record the mask the application thread actually
+  // had. It is injected into the saved ucontext's uc_sigmask below (getcontext()
+  // captured the handler's mask, not the thread's) so the child's setcontext()
+  // restores it. This lets us restart programs whose threads block signals (e.g.
+  // worker threads that mask signals and defer them to a dedicated signal thread).
+  pthread_sigmask(SIG_BLOCK, NULL, &threadInfo->thread_sigmask);
+  sigdelset(&threadInfo->thread_sigmask, SIG_MULTITHREADED_FORK);
 }
 
 static int child_setcontext_fast(void *arg) {
@@ -315,6 +321,12 @@ void thread_handle_after_dmtcp_restart(void) {
   saveThreadStateBeforeFork(threadInfo);
   int rc = getcontext(&threadInfo->context);
   assert(rc == 0);
+
+  // getcontext() ran inside this signal handler, so uc_sigmask holds the
+  // handler's mask (SIG_MULTITHREADED_FORK blocked), not the thread's. Inject
+  // the thread's genuine mask (saved above) so the child's setcontext() restores
+  // what the application thread actually had (instead of aborting on non-empty).
+  threadInfo->context.uc_sigmask = threadInfo->thread_sigmask;
 
   if (mcmini_real_pid(getpid()) == origPid) {
     // Inside the template process

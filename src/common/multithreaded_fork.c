@@ -237,17 +237,17 @@ void saveThreadStateBeforeFork(struct threadinfo* threadInfo) {
   threadInfo->pthread_descriptor = pthread_self();
   getTLSPointer(threadInfo);
 
-  // FIXME:  Add func fo get/set signals in child thread of child process.
-  //         and restore thread sigmask sfter setcontext.
+  // Save this thread's genuine per-thread sigmask so we can restore it in the
+  // forked child (rather than aborting when it is non-empty). We are running
+  // inside the SIG_MULTITHREADED_FORK handler, so that signal is currently
+  // blocked in the captured mask; drop it so we record the mask the application
+  // thread actually had. The mask is injected into the saved ucontext's
+  // uc_sigmask in multithreaded_fork_child_handler (getcontext() captured the
+  // handler's mask, not the thread's), so the child's setcontext() restores it.
+  // This lets us fork/restart programs whose threads block signals (e.g. worker
+  // threads that mask signals and defer them to a dedicated signal thread).
   pthread_sigmask(SIG_BLOCK, NULL, &threadInfo->thread_sigmask);
-  sigset_t sigtest;
-  pthread_sigmask(SIG_BLOCK, NULL, &sigtest);
-  sigdelset(&sigtest, SIG_MULTITHREADED_FORK);
-  if (! sigisemptyset(&sigtest)) {
-    fprintf(stderr, "PID %d: multithreaded_fork() not yet implemented"
-                    " for non-empty thread signaks\n", getpid());
-    libc_abort();
-  }
+  sigdelset(&threadInfo->thread_sigmask, SIG_MULTITHREADED_FORK);
 }
 
 void restoreThreadStateAfterFork(struct threadinfo* threadInfo) {
@@ -431,6 +431,12 @@ void multithreaded_fork_child_handler(int sig) {
     assert(rc == 0);
     // setcontext() returns to here after fork() and clone() of
     //   child thread (setcontext) and setTLSPointer()
+
+    // getcontext() ran inside this signal handler, so uc_sigmask holds the
+    // handler's mask (SIG_MULTITHREADED_FORK blocked), not the thread's. Inject
+    // the thread's genuine mask (saved above) so the child's setcontext()
+    // restores what the application thread actually had.
+    threadInfo->context.uc_sigmask = threadInfo->thread_sigmask;
 
     // NOTE: After the call to `sem_post(3)`, the parent thread
     // may then call `_Fork()`. But this is OK: only the (forked) parent

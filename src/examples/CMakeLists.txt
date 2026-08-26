@@ -211,3 +211,12 @@ target_link_libraries(pipeline_deadlock PUBLIC -pthread)
 target_link_libraries(simple_barrier_with_threads_deadlock PUBLIC -pthread)
 target_link_libraries(multi_phase_barrier_deadlock PUBLIC -pthread)
 target_link_libraries(barrier_more_threads_than_count PUBLIC -pthread)
+add_executable(mut_streamcluster_5_t2
+    /home/aayushi/work/mutation-work/tools/results_streamcluster/run_5_t2/mut_src.cpp
+    /home/aayushi/work/mutation-work/src/streamcluster-src/parsec_barrier.cpp
+)
+target_compile_options(mut_streamcluster_5_t2 PRIVATE
+    -DENABLE_THREADS
+    -I/home/aayushi/work/mutation-work/src/streamcluster-src
+)
+target_link_libraries(mut_streamcluster_5_t2 PUBLIC libmcmini -pthread -lm)

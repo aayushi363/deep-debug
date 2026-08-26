@@ -312,6 +312,8 @@ void do_model_checking(const config& config) {
   mcconfig mc_config;
   mc_config.maximum_total_execution_depth =
       config.maximum_total_execution_depth;
+  mc_config.max_thread_execution_depth =
+      config.max_thread_execution_depth;
   mc_config.stop_at_first_deadlock = config.stop_at_first_deadlock;
   mc_config.policy = config.use_round_robin_scheduling
                          ? mcconfig::exploration_policy::round_robin
@@ -446,7 +448,18 @@ void do_model_checking_from_dmtcp_ckpt_file(const config& config) {
   std::cerr << "\n\n**************** INTIAL STATE *********************\n\n";
   std::cerr.flush();
 
-  model_checking::classic_dpor classic_dpor_checker;
+  using mcconfig = model_checking::classic_dpor::configuration;
+  mcconfig mc_config;
+  mc_config.maximum_total_execution_depth =
+      config.maximum_total_execution_depth;
+  mc_config.max_thread_execution_depth =
+      config.max_thread_execution_depth;
+  mc_config.stop_at_first_deadlock = config.stop_at_first_deadlock;
+  mc_config.policy = config.use_round_robin_scheduling
+                         ? mcconfig::exploration_policy::round_robin
+                         : mcconfig::exploration_policy::smallest_first;
+
+  model_checking::classic_dpor classic_dpor_checker(std::move(mc_config));
   c.trace_completed = &finished_trace_classic_dpor;
   c.undefined_behavior = &found_undefined_behavior;
   c.deadlock = &found_deadlock;
