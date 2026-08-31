@@ -47,32 +47,9 @@ extern int fuzz_getchar(void) __attribute__((weak));
 extern void fuzz_json_data(const char *data, size_t size) __attribute__((weak));
 extern void fuzz_flush(void) __attribute__((weak));
 
-// Fire the "deadlock is unreachable" Antithesis property over the libvoidstar
-// VMCALL so it surfaces in triage. A reachability/Unreachable assertion FAILS
-// when hit, so a hit == "the SUT reached a deadlock (a bug)". We register ON HIT
-// (only ever called with hit=1, at the deadlock site): the hit record is a
-// complete assertion, so triage surfaces the failed property exactly when a
-// deadlock is found. (A separate hit=0 catalog emit at the constructor CRASHES
-// the SUT — fuzz_json_data is not ready before the guest's first syncio; by the
-// deadlock site the scheduler has already made many fuzz_getchar calls, so the
-// VMCALL is warm.) id == message (triage keys one property per message), stable.
-static void emit_deadlock_property(int hit) {
-  if (!fuzz_json_data) return;  // no libvoidstar (standalone) — skip
-  char buf[512];
-  int n = snprintf(buf, sizeof buf,
-      "{\"antithesis_assert\":{\"hit\":%s,\"must_hit\":false,"
-      "\"assert_type\":\"reachability\",\"display_type\":\"Unreachable\","
-      "\"message\":\"deep-debug detected a deadlock\",\"condition\":false,"
-      "\"id\":\"deep-debug detected a deadlock\","
-      "\"location\":{\"class\":\"\",\"function\":\"scheduler_main\","
-      "\"file\":\"inproc_scheduler.c\",\"begin_line\":0,\"begin_column\":0},"
-      "\"details\":{}}}",
-      hit ? "true" : "false");
-  if (n > 0 && (size_t)n < sizeof buf) {
-    fuzz_json_data(buf, (size_t)n);
-    if (fuzz_flush) fuzz_flush();
-  }
-}
+// emit_deadlock_property() is defined below, after the schedule serializers
+// (g_events / g_pending / g_recv) whose buffers it reads to attach the deadlock
+// trace to the assertion details. See just after sched_emit().
 
 // --- scheduler-local state (touched only by the scheduler thread) --------
 typedef enum {
@@ -185,6 +162,12 @@ static void hash_step(runner_id_t r, uint32_t op) {
 static char g_events[1 << 16];
 static int g_events_len = 0;
 
+// Human-readable execution trace (one "thread R: pthread_...(obj)" line per
+// scheduled step, in order) — the readable companion to g_events, attached to
+// the deadlock assertion's details so the failing example reads like a schedule.
+static char g_trace[1 << 15];
+static int g_trace_len = 0;
+
 static const char *op_name(uint32_t op) {
   switch (op) {
     case MUTEX_INIT_TYPE:          return "mutex_init";
@@ -213,6 +196,45 @@ static const char *op_name(uint32_t op) {
 // otherwise it is the op the runner parked on.
 static uint32_t pending_op_of(runner_id_t r) {
   return (g_rs[r].status == RS_READY_START) ? OP_THREAD_START_SENTINEL : g_rs[r].op;
+}
+
+// Render one transition as a human-readable pthread call, e.g.
+// "pthread_mutex_lock(mutex 0x404040)" — used for the readable trace/blocked
+// lists in the deadlock assertion details.
+static void readable_op(char *out, size_t cap, uint32_t op, void *obj,
+                        runner_id_t target) {
+  switch (op) {
+    case MUTEX_INIT_TYPE:    snprintf(out, cap, "pthread_mutex_init(mutex %p)", obj); break;
+    case MUTEX_LOCK_TYPE:    snprintf(out, cap, "pthread_mutex_lock(mutex %p)", obj); break;
+    case MUTEX_UNLOCK_TYPE:  snprintf(out, cap, "pthread_mutex_unlock(mutex %p)", obj); break;
+    case THREAD_CREATE_TYPE: snprintf(out, cap, "pthread_create()"); break;
+    case THREAD_JOIN_TYPE:   snprintf(out, cap, "pthread_join(thread %u)", (unsigned)target); break;
+    case THREAD_EXIT_TYPE:   snprintf(out, cap, "pthread_exit()"); break;
+    case OP_THREAD_START_SENTINEL: snprintf(out, cap, "thread start"); break;
+    case SEM_INIT_TYPE:      snprintf(out, cap, "sem_init(sem %p)", obj); break;
+    case SEM_WAIT_TYPE:      snprintf(out, cap, "sem_wait(sem %p)", obj); break;
+    case SEM_POST_TYPE:      snprintf(out, cap, "sem_post(sem %p)", obj); break;
+    case SEM_DESTROY_TYPE:   snprintf(out, cap, "sem_destroy(sem %p)", obj); break;
+    case COND_INIT_TYPE:     snprintf(out, cap, "pthread_cond_init(cond %p)", obj); break;
+    case COND_ENQUEUE_TYPE:  snprintf(out, cap, "pthread_cond_wait(cond %p) [block]", obj); break;
+    case COND_WAIT_TYPE:     snprintf(out, cap, "pthread_cond_wait(cond %p) [wake]", obj); break;
+    case COND_SIGNAL_TYPE:   snprintf(out, cap, "pthread_cond_signal(cond %p)", obj); break;
+    case COND_BROADCAST_TYPE:snprintf(out, cap, "pthread_cond_broadcast(cond %p)", obj); break;
+    case COND_DESTROY_TYPE:  snprintf(out, cap, "pthread_cond_destroy(cond %p)", obj); break;
+    default:                 snprintf(out, cap, "%s(%p)", op_name(op), obj); break;
+  }
+}
+
+// Append one "thread R: <call>" entry as a JSON string element to (buf,*len).
+static void append_readable(char *buf, int *len, int cap, runner_id_t r,
+                            uint32_t op, void *obj, runner_id_t target) {
+  int rem = cap - *len;
+  if (rem < 160) return;
+  char call[112];
+  readable_op(call, sizeof call, op, obj, target);
+  int n = snprintf(buf + *len, (size_t)rem, "%s\"thread %u: %s\"",
+                   *len ? "," : "", (unsigned)r, call);
+  if (n > 0 && n < rem) *len += n;
 }
 
 // Append one enabled runner's pending transition {runner,op,obj[,target]}.
@@ -262,6 +284,9 @@ static void record_step(const runner_id_t *enabled, int ne, runner_id_t chosen,
     n = snprintf(g_events + g_events_len, (size_t)rem, "]}");
     if (n > 0 && n < rem) g_events_len += n;
   }
+  // Readable companion: "thread C: <call>" for the chosen transition.
+  append_readable(g_trace, &g_trace_len, (int)sizeof(g_trace), chosen, chosen_op,
+                  chosen_obj, g_rs[chosen].target);
 }
 
 // The "pending" set at a deadlock: every still-parked runner's blocked (and
@@ -270,10 +295,13 @@ static void record_step(const runner_id_t *enabled, int ne, runner_id_t chosen,
 // fuzzer-side DPOR needs it to reproduce the deadlock (distinguish it from a
 // clean end). Empty for clean runs.
 static char g_pending[4096];
+// Readable companion to g_pending: "thread R: <call>" for each stuck thread.
+static char g_blocked[4096];
 
 static void build_pending(void) {
   g_pending[0] = '\0';
-  int len = 0;
+  g_blocked[0] = '\0';
+  int len = 0, blen = 0;
   for (runner_id_t r = 0; r <= g_max_rid; r++) {
     if (g_rs[r].status != RS_PARKED) continue;  // exited/ready aren't blocked
     int rem = (int)sizeof(g_pending) - len;
@@ -289,6 +317,8 @@ static void build_pending(void) {
                    "%s{\"runner\":%u,\"op\":\"%s\",\"obj\":\"%p\"}",
                    len ? "," : "", (unsigned)r, op_name(g_rs[r].op), g_rs[r].obj);
     if (n > 0 && n < rem) len += n;
+    append_readable(g_blocked, &blen, (int)sizeof(g_blocked), r, g_rs[r].op,
+                    g_rs[r].obj, g_rs[r].target);
   }
 }
 
@@ -321,6 +351,56 @@ static void sched_emit(const char *outcome) {
                    "\"trace_id\":%lld}}\n",
                    g_events, outcome, g_pending, g_recv, g_steps, g_mtab_n, tid);
   if (n > 0) (void)write(2, buf, (size_t)n);
+}
+
+// Emit the "deadlock is unreachable" Antithesis property over the libvoidstar
+// VMCALL so it surfaces in triage. A reachability/Unreachable assertion FAILS
+// when hit, so a hit == "the SUT reached a deadlock (a bug)". Called two ways:
+//   hit=0 — CATALOG registration: lists the property in triage (details {})
+//           without failing it. Done ONCE at a safe point (after the first
+//           fuzz_getchar; see the call site), never from a constructor —
+//           fuzz_json_data is not ready before the guest's first syncio and
+//           registering that early CRASHES the SUT.
+//   hit=1 — at the deadlock site: flips the property to FAILED and attaches the
+//           deadlock TRACE in details — a readable schedule (trace: "thread R:
+//           pthread_...()" per step), the blocked/deadlocked threads (blocked),
+//           the decision bytes (recv), and trace_id — so the failing example in
+//           triage reads as the exact schedule that deadlocked. Reads g_trace /
+//           g_blocked / g_recv; call it AFTER build_pending().
+// id == message (triage keys one property per message), stable across emits.
+static void emit_deadlock_property(int hit) {
+  if (!fuzz_json_data) return;  // no libvoidstar (standalone) — skip
+  static char det[(1 << 16) + (1 << 14)];  // static: details body (may hold full events)
+  static char buf[(1 << 16) + (1 << 15)];  // static: the full assertion JSON
+  det[0] = '\0';
+  if (hit) {
+    long long tid = (long long)(g_hash & 0x7fffffffffffffffULL);
+    // Human-readable trace: the schedule as "thread R: pthread_...()" lines, the
+    // blocked (deadlocked) threads, and the raw decision bytes for replay.
+    int dn = snprintf(det, sizeof det,
+        "\"outcome\":\"deadlock\",\"trace_id\":%lld,\"total_transitions\":%lu,"
+        "\"trace\":[%s],\"blocked\":[%s],\"recv\":[%s]",
+        tid, g_steps, g_trace, g_blocked, g_recv);
+    if (dn <= 0 || (size_t)dn >= sizeof det)
+      // trace too large to embed: keep the blocked threads + ids, drop trace.
+      snprintf(det, sizeof det,
+          "\"outcome\":\"deadlock\",\"trace_id\":%lld,\"total_transitions\":%lu,"
+          "\"blocked\":[%s],\"recv\":[%s]",
+          tid, g_steps, g_blocked, g_recv);
+  }
+  int n = snprintf(buf, sizeof buf,
+      "{\"antithesis_assert\":{\"hit\":%s,\"must_hit\":false,"
+      "\"assert_type\":\"reachability\",\"display_type\":\"Unreachable\","
+      "\"message\":\"deep-debug detected a deadlock\",\"condition\":false,"
+      "\"id\":\"deep-debug detected a deadlock\","
+      "\"location\":{\"class\":\"\",\"function\":\"scheduler_main\","
+      "\"file\":\"inproc_scheduler.c\",\"begin_line\":0,\"begin_column\":0},"
+      "\"details\":{%s}}}",
+      hit ? "true" : "false", det);
+  if (n > 0 && (size_t)n < sizeof buf) {
+    fuzz_json_data(buf, (size_t)n);
+    if (fuzz_flush) fuzz_flush();
+  }
 }
 
 // atexit hook: fires on NORMAL process exit — i.e. main() returned after the
@@ -598,6 +678,17 @@ static void *scheduler_main(void *unused) {
 
     emit_decide(enabled, ne);  // b4.3(A): publish the decision options BEFORE asking
     int byte = sched_getchar();
+    // Register the deadlock property in the Antithesis catalog exactly once, at
+    // the first safe point: right after the first fuzz_getchar returns (so
+    // libvoidstar is warm — registering earlier, e.g. from a constructor,
+    // crashes the SUT). hit=0 lists the property without failing it; the
+    // emit_deadlock_property(1) at the deadlock branch flips it to FAILED. This
+    // makes the property appear in the triage list even on clean runs.
+    static int deadlock_prop_registered = 0;
+    if (!deadlock_prop_registered) {
+      deadlock_prop_registered = 1;
+      emit_deadlock_property(0);
+    }
     record_recv(byte);  // diagnostic: exactly what the SUT received this step
     runner_id_t chosen = enabled[((unsigned)byte) % (unsigned)ne];
     uint32_t chosen_op = (g_rs[chosen].status == RS_READY_START)
