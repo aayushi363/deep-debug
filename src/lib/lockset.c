@@ -34,6 +34,15 @@ static int ls_skip_stack = 1;
 static int ls_pin_enabled = 1;
 static pthread_once_t ls_once = PTHREAD_ONCE_INIT;
 
+// Set to true the first time the target calls pthread_create. Accesses before
+// any thread is spawned are single-threaded and cannot race; skipping them
+// avoids paying stripe-lock overhead during the (often large) init phase.
+static atomic_bool ls_parallel_started = ATOMIC_VAR_INIT(false);
+
+void lockset_notify_parallel_start(void) {
+  atomic_store_explicit(&ls_parallel_started, true, memory_order_release);
+}
+
 static int ls_env_truthy(const char *name) {
   const char *e = getenv(name);
   return (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
@@ -146,14 +155,15 @@ typedef struct ls_entry {
   uintptr_t prev_site;  // a representative earlier access (for the report)
   int prev_write;       // whether that earlier access was a write
   runner_id_t prev_thread;
+  int already_fired;    // candidate==0 already seen; skip all future accesses
   struct ls_entry *next;
 } ls_entry;
 
-#define LS_NBUCKETS 4096u  // power of two
-#define LS_NSTRIPES 256u   // power of two
+#define LS_NBUCKETS 65536u  // power of two (was 4096 — 16× shorter chains)
+#define LS_NSTRIPES 1024u   // power of two (was 256 — 4× less contention)
 
 static ls_entry *ls_buckets[LS_NBUCKETS];
-static pthread_mutex_t ls_stripes[LS_NSTRIPES];
+static pthread_spinlock_t ls_stripes[LS_NSTRIPES];
 static atomic_bool ls_stripes_inited = ATOMIC_VAR_INIT(false);
 static pthread_mutex_t ls_stripes_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -171,7 +181,7 @@ static void ls_ensure_stripes(void) {
   libpthread_mutex_lock(&ls_stripes_init_lock);
   if (!atomic_load_explicit(&ls_stripes_inited, memory_order_relaxed)) {
     for (unsigned i = 0; i < LS_NSTRIPES; i++)
-      pthread_mutex_init(&ls_stripes[i], NULL);
+      pthread_spin_init(&ls_stripes[i], PTHREAD_PROCESS_PRIVATE);
     // One grow-only slab for shadow entries. MAP_NORESERVE: only touched pages
     // are committed. On failure ls_pool stays NULL and we fall back to calloc.
     void *p = mmap(NULL, LS_POOL_BYTES, PROT_READ | PROT_WRITE,
@@ -356,17 +366,28 @@ void lockset_on_access(runner_id_t self, void *addr, size_t size,
                        uintptr_t site_id, int is_write) {
   (void)size;  // v1: keyed by start word only
   if (!ls_enabled) return;
+  // Single-threaded init accesses cannot race; skip until first pthread_create.
+  if (!atomic_load_explicit(&ls_parallel_started, memory_order_relaxed)) return;
   ls_ensure_stripes();
 
   const uintptr_t word = (uintptr_t)addr & ~(uintptr_t)7;
   const unsigned h = ls_hash(word);
   const unsigned bidx = h & (LS_NBUCKETS - 1);
-  pthread_mutex_t *stripe = &ls_stripes[h & (LS_NSTRIPES - 1)];
+  pthread_spinlock_t *stripe = &ls_stripes[h & (LS_NSTRIPES - 1)];
 
-  libpthread_mutex_lock(stripe);
+  pthread_spin_lock(stripe);
 
   ls_entry *e = ls_buckets[bidx];
   while (e && e->word != word) e = e->next;
+
+  // Fast path: once candidate==0 has been seen for this word, the Eraser state
+  // machine can only stay in SHARED_MODIFIED with candidate==0 forever. All
+  // future accesses are no-ops; skip the state machine entirely.
+  if (e && e->already_fired) {
+    pthread_spin_unlock(stripe);
+    return;
+  }
+
   if (!e) {
     e = ls_pool_alloc();
     if (!e) {  // out of memory: skip silently, predictor is best-effort
@@ -399,7 +420,7 @@ void lockset_on_access(runner_id_t self, void *addr, size_t size,
       e->candidate = tl_held_locks;  // == ALL_LOCKS & held(self)
       if (is_write || e->prev_write) {
         e->state = LS_SHARED_MODIFIED;
-        if (e->candidate == 0) fire = 1;
+        if (e->candidate == 0) { fire = 1; e->already_fired = 1; }
       } else {
         e->state = LS_SHARED;
       }
@@ -409,13 +430,13 @@ void lockset_on_access(runner_id_t self, void *addr, size_t size,
       e->candidate &= tl_held_locks;
       if (is_write) {
         e->state = LS_SHARED_MODIFIED;
-        if (e->candidate == 0) fire = 1;
+        if (e->candidate == 0) { fire = 1; e->already_fired = 1; }
       }
       break;
 
     case LS_SHARED_MODIFIED:
       e->candidate &= tl_held_locks;
-      if (e->candidate == 0) fire = 1;
+      if (e->candidate == 0) { fire = 1; e->already_fired = 1; }
       break;
   }
 
@@ -445,7 +466,7 @@ void lockset_on_access(runner_id_t self, void *addr, size_t size,
   e->prev_write = is_write;
   e->prev_thread = self;
 
-  libpthread_mutex_unlock(stripe);
+  pthread_spin_unlock(stripe);
 
   if (fire) {
     int newly =

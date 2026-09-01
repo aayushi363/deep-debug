@@ -77,6 +77,11 @@ typedef void (*lockset_race_handler)(void *addr, uintptr_t site_a, int write_a,
 /// @brief Override the race handler. If unset, a default handler logs to stderr.
 void lockset_set_race_handler(lockset_race_handler handler);
 
+/// @brief Notify the lockset predictor that the first worker thread has been
+/// created. Accesses before this point are single-threaded and cannot race;
+/// calling this enables the hot path in lockset_on_access.
+void lockset_notify_parallel_start(void);
+
 #ifdef __cplusplus
 }
 #endif

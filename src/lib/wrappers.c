@@ -158,6 +158,7 @@ sem_t *find_really_exited_sem(pthread_t t) {
 
 
 MCMINI_THREAD_LOCAL runner_id_t tid_self = RID_INVALID;
+__thread mc_tls_cache_entry mc_tls_obj_cache[MCMINI_TLS_CACHE_SIZE];
 
 // Set (on the creating thread) while libmcmini creates one of its OWN helper
 // threads (e.g. the template thread) via the public pthread_create. It tells
@@ -988,7 +989,9 @@ int mc_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
       // path (see interception.c) applies on the new thread, and it never
       // needs to reach pthread_once()/TSAN's interceptor itself.
       libmcmini_init();
-
+      // Notify the lockset predictor that parallel execution is starting so it
+      // stops skipping pre-parallel accesses.
+      lockset_notify_parallel_start();
       // TODO: add support for thread attributes
       struct mc_thread_routine_arg *libmcmini_controlled_thread_arg =
           malloc(sizeof(struct mc_thread_routine_arg));
