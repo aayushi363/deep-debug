@@ -391,7 +391,7 @@ void lockset_on_access(runner_id_t self, void *addr, size_t size,
   if (!e) {
     e = ls_pool_alloc();
     if (!e) {  // out of memory: skip silently, predictor is best-effort
-      libpthread_mutex_unlock(stripe);
+      pthread_spin_unlock(stripe);
       return;
     }
     e->word = word;
