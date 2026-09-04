@@ -47,6 +47,12 @@ extern int fuzz_getchar(void) __attribute__((weak));
 extern void fuzz_json_data(const char *data, size_t size) __attribute__((weak));
 extern void fuzz_flush(void) __attribute__((weak));
 
+// glibc: basename of argv[0] (e.g. "sct_sync02"). Used to make the deadlock
+// triage property PER-BENCHMARK — each SUT binary gets its own named property,
+// so a sweep over many benchmarks shows one FAILED property per benchmark
+// instead of all collapsing into one shared "deadlock" property.
+extern char *program_invocation_short_name;
+
 // emit_deadlock_property() is defined below, after the schedule serializers
 // (g_events / g_pending / g_recv) whose buffers it reads to attach the deadlock
 // trace to the assertion details. See just after sched_emit().
@@ -201,8 +207,12 @@ static uint32_t pending_op_of(runner_id_t r) {
 // Render one transition as a human-readable pthread call, e.g.
 // "pthread_mutex_lock(mutex 0x404040)" — used for the readable trace/blocked
 // lists in the deadlock assertion details.
+// pthread_cond_wait is modeled as two transitions (COND_ENQUEUE = sleep+release
+// mutex, COND_WAIT = wake+reacquire mutex). `in_blocked` renders a thread that
+// is PARKED on the wait (i.e. asleep waiting for a signal) as "asleep in ..."
+// rather than "wake ...", which would misdescribe a stuck waiter.
 static void readable_op(char *out, size_t cap, uint32_t op, void *obj,
-                        runner_id_t target) {
+                        runner_id_t target, int in_blocked) {
   switch (op) {
     case MUTEX_INIT_TYPE:    snprintf(out, cap, "pthread_mutex_init(mutex %p)", obj); break;
     case MUTEX_LOCK_TYPE:    snprintf(out, cap, "pthread_mutex_lock(mutex %p)", obj); break;
@@ -216,8 +226,11 @@ static void readable_op(char *out, size_t cap, uint32_t op, void *obj,
     case SEM_POST_TYPE:      snprintf(out, cap, "sem_post(sem %p)", obj); break;
     case SEM_DESTROY_TYPE:   snprintf(out, cap, "sem_destroy(sem %p)", obj); break;
     case COND_INIT_TYPE:     snprintf(out, cap, "pthread_cond_init(cond %p)", obj); break;
-    case COND_ENQUEUE_TYPE:  snprintf(out, cap, "pthread_cond_wait(cond %p) [block]", obj); break;
-    case COND_WAIT_TYPE:     snprintf(out, cap, "pthread_cond_wait(cond %p) [wake]", obj); break;
+    case COND_ENQUEUE_TYPE:  snprintf(out, cap, "pthread_cond_wait(cond %p) - sleep (release mutex)", obj); break;
+    case COND_WAIT_TYPE:
+      if (in_blocked) snprintf(out, cap, "asleep in pthread_cond_wait(cond %p)", obj);
+      else            snprintf(out, cap, "pthread_cond_wait(cond %p) - wake (reacquire mutex)", obj);
+      break;
     case COND_SIGNAL_TYPE:   snprintf(out, cap, "pthread_cond_signal(cond %p)", obj); break;
     case COND_BROADCAST_TYPE:snprintf(out, cap, "pthread_cond_broadcast(cond %p)", obj); break;
     case COND_DESTROY_TYPE:  snprintf(out, cap, "pthread_cond_destroy(cond %p)", obj); break;
@@ -226,12 +239,14 @@ static void readable_op(char *out, size_t cap, uint32_t op, void *obj,
 }
 
 // Append one "thread R: <call>" entry as a JSON string element to (buf,*len).
+// in_blocked=1 for the blocked/parked list (renders a stuck waiter as asleep).
 static void append_readable(char *buf, int *len, int cap, runner_id_t r,
-                            uint32_t op, void *obj, runner_id_t target) {
+                            uint32_t op, void *obj, runner_id_t target,
+                            int in_blocked) {
   int rem = cap - *len;
   if (rem < 160) return;
   char call[112];
-  readable_op(call, sizeof call, op, obj, target);
+  readable_op(call, sizeof call, op, obj, target, in_blocked);
   int n = snprintf(buf + *len, (size_t)rem, "%s\"thread %u: %s\"",
                    *len ? "," : "", (unsigned)r, call);
   if (n > 0 && n < rem) *len += n;
@@ -286,7 +301,7 @@ static void record_step(const runner_id_t *enabled, int ne, runner_id_t chosen,
   }
   // Readable companion: "thread C: <call>" for the chosen transition.
   append_readable(g_trace, &g_trace_len, (int)sizeof(g_trace), chosen, chosen_op,
-                  chosen_obj, g_rs[chosen].target);
+                  chosen_obj, g_rs[chosen].target, /*in_blocked=*/0);
 }
 
 // The "pending" set at a deadlock: every still-parked runner's blocked (and
@@ -318,7 +333,7 @@ static void build_pending(void) {
                    len ? "," : "", (unsigned)r, op_name(g_rs[r].op), g_rs[r].obj);
     if (n > 0 && n < rem) len += n;
     append_readable(g_blocked, &blen, (int)sizeof(g_blocked), r, g_rs[r].op,
-                    g_rs[r].obj, g_rs[r].target);
+                    g_rs[r].obj, g_rs[r].target, /*in_blocked=*/1);
   }
 }
 
@@ -364,10 +379,11 @@ static void sched_emit(const char *outcome) {
 //   hit=1 — at the deadlock site: flips the property to FAILED and attaches the
 //           deadlock TRACE in details — a readable schedule (trace: "thread R:
 //           pthread_...()" per step), the blocked/deadlocked threads (blocked),
-//           the decision bytes (recv), and trace_id — so the failing example in
-//           triage reads as the exact schedule that deadlocked. Reads g_trace /
-//           g_blocked / g_recv; call it AFTER build_pending().
-// id == message (triage keys one property per message), stable across emits.
+//           and trace_id — so the failing example in triage reads as the exact
+//           schedule that deadlocked. Reads g_trace / g_blocked; call it AFTER
+//           build_pending().
+// id == message == "deep-debug detected a deadlock: <binary>" (per-benchmark, so
+// a sweep shows one property per binary); triage keys one property per id.
 static void emit_deadlock_property(int hit) {
   if (!fuzz_json_data) return;  // no libvoidstar (standalone) — skip
   static char det[(1 << 16) + (1 << 14)];  // static: details body (may hold full events)
@@ -375,28 +391,35 @@ static void emit_deadlock_property(int hit) {
   det[0] = '\0';
   if (hit) {
     long long tid = (long long)(g_hash & 0x7fffffffffffffffULL);
-    // Human-readable trace: the schedule as "thread R: pthread_...()" lines, the
-    // blocked (deadlocked) threads, and the raw decision bytes for replay.
+    // Human-readable trace: the schedule as "thread R: pthread_...()" lines plus
+    // the blocked (deadlocked) threads. (The raw decision bytes stay in the
+    // MCMINI_SCHEDULE_JSON log for replay; they're just noise in the report.)
     int dn = snprintf(det, sizeof det,
         "\"outcome\":\"deadlock\",\"trace_id\":%lld,\"total_transitions\":%lu,"
-        "\"trace\":[%s],\"blocked\":[%s],\"recv\":[%s]",
-        tid, g_steps, g_trace, g_blocked, g_recv);
+        "\"trace\":[%s],\"blocked\":[%s]",
+        tid, g_steps, g_trace, g_blocked);
     if (dn <= 0 || (size_t)dn >= sizeof det)
       // trace too large to embed: keep the blocked threads + ids, drop trace.
       snprintf(det, sizeof det,
           "\"outcome\":\"deadlock\",\"trace_id\":%lld,\"total_transitions\":%lu,"
-          "\"blocked\":[%s],\"recv\":[%s]",
-          tid, g_steps, g_blocked, g_recv);
+          "\"blocked\":[%s]",
+          tid, g_steps, g_blocked);
   }
+  // Per-benchmark property: name it after the SUT binary so a sweep shows one
+  // FAILED property per benchmark, not one shared "deadlock" property.
+  const char *bench = program_invocation_short_name ? program_invocation_short_name
+                                                    : "unknown";
+  char prop[160];
+  snprintf(prop, sizeof prop, "deep-debug detected a deadlock: %s", bench);
   int n = snprintf(buf, sizeof buf,
       "{\"antithesis_assert\":{\"hit\":%s,\"must_hit\":false,"
       "\"assert_type\":\"reachability\",\"display_type\":\"Unreachable\","
-      "\"message\":\"deep-debug detected a deadlock\",\"condition\":false,"
-      "\"id\":\"deep-debug detected a deadlock\","
+      "\"message\":\"%s\",\"condition\":false,"
+      "\"id\":\"%s\","
       "\"location\":{\"class\":\"\",\"function\":\"scheduler_main\","
       "\"file\":\"inproc_scheduler.c\",\"begin_line\":0,\"begin_column\":0},"
       "\"details\":{%s}}}",
-      hit ? "true" : "false", det);
+      hit ? "true" : "false", prop, prop, det);
   if (n > 0 && (size_t)n < sizeof buf) {
     fuzz_json_data(buf, (size_t)n);
     if (fuzz_flush) fuzz_flush();
