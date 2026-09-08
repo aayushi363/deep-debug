@@ -74,6 +74,18 @@ MCMINI_NO_RETURN void mc_transparent_exit(int status);
 MCMINI_NO_RETURN void mc_pthread_exit(void *retval);
 
 
+/* TLS cache: per-thread direct-mapped cache of rec_list* pointers.
+ * Eliminates pthread_rwlock on every hot-path interception. */
+#define MCMINI_TLS_CACHE_BITS 8
+#define MCMINI_TLS_CACHE_SIZE (1 << MCMINI_TLS_CACHE_BITS)
+
+typedef struct {
+    void     *addr;
+    rec_list *rec;
+} mc_tls_cache_entry;
+
+extern __thread mc_tls_cache_entry mc_tls_obj_cache[MCMINI_TLS_CACHE_SIZE];
+
 /*
  * This function implements the thread-safe "find-or-create" pattern
  * for any OBJECT record (mutex, cond, semaphore).
@@ -85,32 +97,77 @@ static inline rec_list* get_or_create_object_record(void *obj_addr,
                                                     visible_object_type obj_type,
                                                     int uninit_state)
 {
+    // rec_list *record;
+
+    // // 1. Try with read lock
+    // pthread_rwlock_rdlock(&rec_list_lock);
+    // record = find_object_record_mode(obj_addr);
+    // pthread_rwlock_unlock(&rec_list_lock);
+
+    // if (record == NULL) {
+    //     // 2. Need to create it, get write lock
+    //     pthread_rwlock_wrlock(&rec_list_lock);
+
+    //     // 3. MUST CHECK AGAIN (the "double-check")
+    //     record = find_object_record_mode(obj_addr);
+    //     if (record == NULL) {
+    //         // 4. It's really not there. Create it.
+    //         visible_object vo = {
+    //             .type = obj_type,
+    //             .location = obj_addr
+    //         };
+            
+    //         // We have to set the correct union field for the initial state
+    //         if (obj_type == MUTEX) {
+    //             vo.mut_state = uninit_state;
+    //         } else if (obj_type == SEMAPHORE) {
+    //             vo.sem_state.status = uninit_state;
+    //             vo.sem_state.count = 0; // Or some initial value
+    //         } else if (obj_type == BARRIER) {
+    //             vo.bar_state.status = uninit_state;
+    //             vo.bar_state.count = 0;
+    //             vo.bar_state.arrived = 0;
+    //         } else if (obj_type == CONDITION_VARIABLE) {
+    //             vo.cond_state.status = uninit_state;
+    //             vo.cond_state.interacting_thread = 0;
+    //             vo.cond_state.associated_mutex = NULL;
+    //             vo.cond_state.count = 0;
+    //             vo.cond_state.waiting_threads = create_thread_queue();
+    //         }
+            
+    //         record = add_rec_entry_record_mode(&vo);
+    //     }
+
+    //     // 5. Release write lock
+    //     pthread_rwlock_unlock(&rec_list_lock);
+    // }
+
+    /* TLS cache check: ~2 ns, no lock, no shared memory.
+     * Empty slot has addr == NULL, safe since obj_addr is always non-NULL. */
+    unsigned slot = ((uintptr_t)obj_addr >> 4) & (MCMINI_TLS_CACHE_SIZE - 1);
+    mc_tls_cache_entry *e = &mc_tls_obj_cache[slot];
+    if (__builtin_expect(e->addr == obj_addr, 1)) return e->rec;
+
     rec_list *record;
 
-    // 1. Try with read lock
+    /* Cache miss: pay rwlock once, then cache for this thread. */
     pthread_rwlock_rdlock(&rec_list_lock);
     record = find_object_record_mode(obj_addr);
     pthread_rwlock_unlock(&rec_list_lock);
 
     if (record == NULL) {
-        // 2. Need to create it, get write lock
         pthread_rwlock_wrlock(&rec_list_lock);
-
-        // 3. MUST CHECK AGAIN (the "double-check")
         record = find_object_record_mode(obj_addr);
         if (record == NULL) {
-            // 4. It's really not there. Create it.
             visible_object vo = {
                 .type = obj_type,
                 .location = obj_addr
             };
-            
-            // We have to set the correct union field for the initial state
             if (obj_type == MUTEX) {
                 vo.mut_state = uninit_state;
             } else if (obj_type == SEMAPHORE) {
                 vo.sem_state.status = uninit_state;
-                vo.sem_state.count = 0; // Or some initial value
+                vo.sem_state.count = 0;
             } else if (obj_type == BARRIER) {
                 vo.bar_state.status = uninit_state;
                 vo.bar_state.count = 0;
@@ -122,15 +179,14 @@ static inline rec_list* get_or_create_object_record(void *obj_addr,
                 vo.cond_state.count = 0;
                 vo.cond_state.waiting_threads = create_thread_queue();
             }
-            
             record = add_rec_entry_record_mode(&vo);
         }
-
-        // 5. Release write lock
         pthread_rwlock_unlock(&rec_list_lock);
     }
 
-    // 6. Return the valid record
+    /* Populate cache so next call from this thread skips the rwlock. */
+    e->addr = obj_addr;
+    e->rec  = record;
     return record;
 }
 
