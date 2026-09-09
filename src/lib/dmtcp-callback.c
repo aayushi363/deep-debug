@@ -17,6 +17,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 #include <limits.h>
+#include <dirent.h>
 
 #include "dmtcp.h"
 #include "mcmini/mcmini.h"
@@ -93,6 +94,7 @@ struct threadinfo {
   unsigned long int tlsAddr;
   // glibc:pthread_create and pthread_self use this, but not the clone call:
   pthread_t pthread_descriptor;
+  sigset_t thread_sigmask;
 } threadInfos[1000];
 
 static volatile atomic_int threadIdx = 0; // threadInfo[threadIdx] is 'struct threadinfo' for next thread.

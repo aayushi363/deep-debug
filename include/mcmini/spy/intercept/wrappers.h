@@ -164,7 +164,7 @@ static inline rec_list* get_or_create_object_record(void *obj_addr,
                 .location = obj_addr
             };
             if (obj_type == MUTEX) {
-                vo.mut_state = uninit_state;
+                vo.mut_state.status = uninit_state;
             } else if (obj_type == SEMAPHORE) {
                 vo.sem_state.status = uninit_state;
                 vo.sem_state.count = 0;

@@ -94,11 +94,6 @@ static const int QUIET_THRESHOLD = 100;
 // The minimum CPU time (in nanoseconds) that counts as "progress"
 // If less than this between ticks, we consider that "no CPU progress".
 static const long PROGRESS_NSEC = 5000000; // 5 ms
-/* Livelock detection parameters */
-/* If no progress for this many samples (~10ms per sample), consider it stalled */
-static const long PROG_NO_ADVANCE_SAMPLES = 200; /* ~5s */
-/* If CPU-time advanced by more than this while no progress, treat as livelock */
-static const unsigned long CPU_BUSY_THRESHOLD_NS = 50000000UL; /* 50 ms */
 static atomic_long tick_count     = ATOMIC_VAR_INIT(0);
 static atomic_ulong progress_counter = ATOMIC_VAR_INIT(0);
 

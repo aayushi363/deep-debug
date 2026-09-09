@@ -64,7 +64,7 @@ void ensure_cond_initialized(model_to_system_map &m,
   ConditionVariablePolicy *policy = new ConditionVariableArbitraryPolicy();
   m.observe_object(remote_cond, new condition_variable(
                                     condition_variable::state::cv_initialized,
-                                    policy));
+                                    RID_INVALID, nullptr, 0, {}, policy));
 }
 
 }  // namespace

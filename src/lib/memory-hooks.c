@@ -48,7 +48,6 @@ static void mcmini_memory_access(void *addr, size_t size, uintptr_t site_id,
   switch (get_current_mode()) {
     case PRE_DMTCP_INIT:
     case PRE_CHECKPOINT_THREAD:
-    case CHECKPOINT_THREAD:
     case RECORD:
     case PRE_CHECKPOINT: {
       break;
